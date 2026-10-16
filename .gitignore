@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# SDK checkout and build output
+# ---------------------------------------------------------------------------
+# Pinned muse-gadget-sdk clone (created by scripts/build.sh)
+.sdk/
+# ESP-IDF build directories (e.g. build-muse-m5stack-stopwatch/)
+build/
+build*/
+managed_components/
+
+# ---------------------------------------------------------------------------
+# ESP-IDF configuration: may contain CONFIG_GADGET_SDK_TOKEN
+# ---------------------------------------------------------------------------
+sdkconfig
+sdkconfig.old
+sdkconfig.*
+sdkconfig.json
+sdkconfig.h
+
+# ---------------------------------------------------------------------------
+# Firmware images and flash dumps: may contain the token or device secrets
+# ---------------------------------------------------------------------------
+*.bin
+*.bin.partial
+*.bin.sha256
+*.elf
+*.map
+backups/
+
+# ---------------------------------------------------------------------------
+# Anything token- or secret-shaped
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.token
+*.secret
+*.secrets
+*_token
+*_token.*
+*-token
+*-token.*
+token
+token.*
+sdk_token*
+.sdk_token*
+gadget_token*
+secrets/
+secret/
+*.pem
+*.key
+# ...but keep the token documentation
+!docs/token.md
+
+# ---------------------------------------------------------------------------
+# Editor / OS / tooling noise
+# ---------------------------------------------------------------------------
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+*.swp
+*~

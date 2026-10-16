@@ -1,0 +1,85 @@
+# StopWatch Muse Gadget — Project Plan
+
+*Prepared with Claude on Oct 16, 2026. Verified against a local clone of `facebookincubator/muse-gadget-sdk` (commit `fa073045`, Oct 15, 2026) at `~/workspace/gadgets/muse-gadget-sdk`.*
+
+## Support status: confirmed ✅
+
+Claude initially thought the StopWatch wasn't officially supported (it saw a stale README). The local clone proves it is:
+
+- `esp32/devices/sdkconfig.muse-m5stack-stopwatch` — board overlay
+- `esp32/components/muse/boards/board_m5stack_stopwatch.c` — board driver
+- `esp32/tests/test_stopwatch_controls.py`, `test_stopwatch_power.py` — hardware tests
+- Build table: chip `esp32s3`, overlays `sdkconfig.muse` + `sdkconfig.muse-m5stack-stopwatch`, built "by hand" (idf.py + overlays)
+- Flashing: `tools/muse/board.sh flash stopwatch` — "flashing needs nothing special"
+
+Full feature set per the support matrix: avatar status display, images from Muse, on-device UI/settings, push-to-talk, speaker + mic, touch, battery status, OTA updates, home-network tunnel. Button mapping: **blue top-right = talk, yellow top-left = speaker, red bottom-left = power**. No board port needed.
+
+## How we'll split the work
+
+- **Assistant (this VM):** install ESP-IDF v6.0.1, build the firmware `.bin`, read docs/AGENTS.md, prepare configs.
+- **Mohamed (his Mac):** the StopWatch will be physically at home, so flashing happens on his Mac (USB serial). Either he runs the full pipeline locally with guidance, or the assistant builds the `.bin` here and he flashes it with esptool.
+- **Mohamed only:** SDK token (tied to his Muse account), accepting the Gadget SDK Terms, enabling Developer mode in the Muse app.
+
+## (A) Before the hardware arrives
+
+**A1. Mohamed's steps**
+1. Get the SDK token at `gadgets.muse.ai/settings/sdk-tokens` (signed into his own account). Keep it out of git — local untracked config or env var.
+2. Read and accept the Gadget SDK Terms himself. Note: he works at Google — check employer's outside-project/open-source policy before publishing any fork publicly. Tinker privately first.
+3. Enable Developer mode in the Muse app: Settings → Devices.
+
+**A2. Toolchain: ESP-IDF v6.0.1 exactly**
+```
+mkdir -p ~/esp && cd ~/esp
+git clone -b v6.0.1 --recursive https://github.com/espressif/esp-idf.git esp-idf-v6.0.1
+cd esp-idf-v6.0.1
+./install.sh esp32s3,esp32c5
+. ./export.sh        # each new shell; consider an `idf601` alias
+idf.py --version     # must print v6.0.1
+```
+Keep separate from any other IDF install; don't let a global IDF_PATH point elsewhere.
+
+**A3. Prove the build pipeline with no hardware**
+1. Build the default target: `cd esp32 && idf.py set-target esp32c5 && idf.py build`
+2. Build the StopWatch overlay itself (no hardware needed to compile):
+```
+idf.py -B build-muse-m5stack-stopwatch -DIDF_TARGET=esp32s3 \
+  -DSDKCONFIG=build-muse-m5stack-stopwatch/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-m5stack-stopwatch" build
+```
+If this builds cleanly, day one is just flash + pair.
+
+**A4. Read the board support**
+- `esp32/devices/AGENTS.md` in full (board bring-up guide).
+- `esp32/components/muse/boards/board_m5stack_stopwatch.c` and the stopwatch overlay — see what's already wired (display, touch, audio, buttons, power) so nothing gets re-done.
+
+**A5. First-flash risks**
+- M5Stack's factory firmware (UiFlow2-style) can take over the ESP32-S3's USB and switch off the USB serial port — the StickS3 needed a REPL workaround, and the StopWatch is a sibling design with a power-management chip. Have that workaround ready; unconfirmed until the device is plugged in.
+- Back up the factory flash first (16 MB): `esptool --chip esp32s3 -p PORT read-flash 0 0x1000000 stopwatch-factory.bin`
+- NVS encryption: docs recommend `CONFIG_HOMEHUB_NVS_ENCRYPTION`, but on ESP32-S3 it can burn eFuses (irreversible) and may block returning to factory firmware. Sane path: first-light without it on a trusted network, enable later once the implications are clear.
+
+## (B) Day-one sequence (when it arrives)
+
+1. Unbox, charge over USB-C, note what the factory firmware does with each button.
+2. Connect to the Mac; enumerate the serial port (`ls /dev/cu.usbmodem*`). If no port appears, use the A5 workaround.
+3. Back up the factory flash (command above).
+4. Build with the stopwatch overlay (A3).
+5. Flash + monitor; watch the log for PSRAM detection (8 MB), partition table, Wi-Fi/BLE init.
+6. Pair on a trusted home network (not public Wi-Fi): Muse app → Settings → Devices → Developer mode → find `MuseGadget-…`. Orange breathing = ready, blue breathing = press the physical button to confirm, green = connected.
+7. Bring up features one at a time: display/avatar → touch → speaker → mic → push-to-talk → battery → OTA. Commit after each works.
+8. Verify the button mapping on the real device before relying on it.
+9. Decide on NVS encryption; reflash if enabling.
+
+## First-project ideas (beyond stock push-to-talk)
+
+The SDK lets boards expose commands Muse can call (other boards expose `sensors.read`, `camera.capture`, etc.). Natural pattern: add StopWatch-specific commands, let Muse drive them.
+
+1. **Raise-to-talk with haptic states.** BMI270 motion detection (wrist raise / flip face-up) starts push-to-talk, button as fallback. Vibration patterns signal state (one tick = listening, two = reply incoming, long buzz = error). Mic-level ring around the AMOLED edge; black backgrounds (black pixels cost ~nothing on AMOLED — matters with 450 mAh).
+2. **Voice-set timer that survives offline.** "Muse, set a 12-minute pasta timer" → new `timer.set` command. The RX8130CE RTC counts down locally even if Wi-Fi drops; sweeping arc on the round display; vibration + speaker chime at zero. Variants: Pomodoro, 2-minute routines. `timer.list` / cancel / extend.
+3. **Tilt-dial navigator.** Gyroscope as a virtual watch crown: rotate to scroll through images/cards Muse pushes, tap to select. New `imu.read` command (orientation, shake-to-dismiss). Stretch: expose a Grove sensor on the HY2.0-4P port via a `sensors.read`-style command, mirroring the SenseCAP Indicator pattern.
+
+## Still to verify in the clone
+
+- [ ] Where the SDK token gets injected (Kconfig / menuconfig / provisioning step / pairing flow) — grep for it.
+- [ ] Which NVS encryption scheme `CONFIG_HOMEHUB_NVS_ENCRYPTION` uses and whether it burns eFuses.
+- [x] StopWatch board support exists — confirmed.
+- [x] Build is by-hand (idf.py + overlays); flash via `tools/muse/board.sh flash stopwatch`.
