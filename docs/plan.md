@@ -16,7 +16,7 @@ Done:
 - [x] SDK token set over serial. Paired in the Muse app.
 - [x] **Spoken replies.** The pinned SDK only shows replies as text. The speaker was fine (the
       settings beep played), but the log showed the "reply audio" was the silence that paces the
-      captions. Added Gemini TTS (`gemini-3.8-flash-lite-tts`, voice Achernar), keyed over serial
+      captions. Added Gemini TTS (`gemini-3.8-flash-lite-tts`, voice Leda; Kore and Achernar before), keyed over serial
       with `>gemini_key=`.
 - [x] Fixed TLS to Google. It needed `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY`
       (GTS Root R4 is cross-signed by GlobalSign).
@@ -34,7 +34,9 @@ Done:
   - The Wi-Fi nap starts after 30 s.
   - New Auto power-off setting (default 30 min asleep on battery).
   - CPU power-down in light sleep is left off: it needs 8.5 KB of internal RAM the board can't spare.
-- [x] While asleep, only the red button wakes the watch (`.power_wakes_only`).
+- [x] While asleep, red wakes the watch and holding blue (0.3 s) wakes it and listens; touch, yellow
+      and a quick blue click are ignored (`.power_wakes_only`).
+      Red-only wake was tried first, but with 30 s auto-sleep the talk button was usually ignored.
 - [x] Blue (talk) and yellow (speaker on/off) work as mapped on the device. Red power-off and wake are still to test (below).
 
 Decided against:
@@ -130,7 +132,7 @@ The SDK lets boards expose commands Muse can call (other boards expose `sensors.
       This matters more now, because NVS holds the Gemini key as well as the SDK token.
 - [ ] Measure battery life with the new sleep settings (screen-off hours on a full charge), and
       check that Auto power-off fires on battery.
-- [ ] Check the wake rules on battery: taps and the blue and yellow buttons do nothing while asleep,
-      and red wakes the watch.
+- [ ] Check the wake rules on battery: taps and yellow do nothing while asleep; red wakes the watch,
+      and holding blue wakes it and listens (a click doesn't).
 - [x] StopWatch board support exists — confirmed.
 - [x] Build is by-hand (idf.py + overlays); flash via `tools/muse/board.sh flash stopwatch`.

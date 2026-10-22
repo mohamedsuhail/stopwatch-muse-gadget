@@ -13,12 +13,13 @@ On top of the stock SDK, this repo adds:
 
 - **Spoken replies.** At the pinned commit the SDK shows Muse's replies as text only, with no
   speech. This repo sends each reply to Google's Gemini TTS (`gemini-3.8-flash-lite-tts`, voice
-  **Achernar**) and plays the audio on the watch's speaker. This needs a Gemini API key (step 5).
+  **Leda**) and plays the audio on the watch's speaker. This needs a Gemini API key (step 5).
 - **A custom avatar.** A toy astronaut (`avatar/muse_pixel.c`), drawn at 448 px so it fills most of
   the round screen.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
   asleep on battery for a while.
-- **Red-button wake.** While asleep, only the red button wakes the watch.
+- **Button-only wake.** While asleep, red wakes the watch, and holding blue wakes it and listens.
+  Taps on the screen and a quick click of blue are ignored.
 
 The SDK itself stays untouched in `.sdk/`. `scripts/build.sh` applies `patches/*.patch` and copies
 in the avatar before every build. Details: [Customizations](#customizations).
@@ -130,7 +131,7 @@ To turn spoken replies off again, send `>gemini_key=` with nothing after it. The
 
 1. In the Muse app: **Settings → Devices → Developer mode**.
 2. Join your trusted home Wi-Fi on both the phone and the device when prompted.
-3. Press the red button to wake the watch, then hold the blue top-right button to talk.
+3. Hold the blue top-right button to talk. It wakes the watch too, if it's asleep.
 
 The watch's light shows the pairing state:
 
@@ -144,12 +145,20 @@ The watch's light shows the pairing state:
 
 | Button | Position | Awake | Asleep |
 | --- | --- | --- | --- |
-| Blue | top-right | Hold to talk | Ignored |
+| Blue | top-right | Hold to talk | Hold: wakes it and listens. Click: ignored |
 | Yellow | top-left | Speaker on/off (**SPEAKER ON** / **SPEAKER OFF** on screen) | Ignored |
-| Red | bottom-left | Hold to power off | **Wakes the watch**; turns it on after power-off |
+| Red | bottom-left | Click: power on/reset. Double-click: power off | Wakes the watch |
 
-Touch works normally while the watch is awake. While it's asleep, taps are ignored. Only the red
-button wakes it.
+Touch works normally while the watch is awake. While it's asleep, taps and the yellow button are
+ignored.
+
+While the watch is asleep, a blue press shorter than 0.3 s is ignored, so it stays asleep. Hold it
+and the watch wakes and listens. The microphone is off while asleep, so wait for the screen to
+show it's listening before you start talking.
+
+Don't hold red for 2 s while the USB cable is plugged in: that puts the watch into download mode
+(green light flashing, screen black). To get out, unplug it, double-click red to power off, then
+click red once.
 
 ## Customizations
 
@@ -169,7 +178,7 @@ leaves speech to "a text-to-speech API of your choice". The patch adds:
     (`CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS`), which makes the handshake shorter.
   - The API sends 24 kHz 16-bit mono PCM, whatever `sample_rate` the request asks for. The watch
     resamples it to the speaker's 16 kHz.
-  - The model is `gemini-3.8-flash-lite-tts`, and the voice is `Achernar` (`VOICE` in that file).
+  - The model is `gemini-3.8-flash-lite-tts`, and the voice is `Leda` (`VOICE` in that file).
     You can use any of the 30 prebuilt voices, such as Kore or Puck.
   - If the request fails, the reply falls back to captions. The serial log says why.
   - Each sentence logs its timing, for example
@@ -269,8 +278,10 @@ Nothing leaves the watch until you hold the blue button.
 
 ### Wake
 
-The board file sets `.power_wakes_only = true`. While asleep, touch and the blue and yellow buttons
-are ignored. A pairing prompt or an image from Muse still wakes the screen.
+The board file sets `.power_wakes_only = true`. While asleep, touch and the yellow button are
+ignored. Red wakes the watch. Holding blue for 0.3 s wakes it and listens, and a shorter click is
+ignored (`HOLD_WAKE_MS` in `muse_input.c`). A pairing prompt or an image from Muse still wakes the
+screen.
 
 ## Repo layout
 

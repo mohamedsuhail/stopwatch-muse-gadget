@@ -12,7 +12,7 @@ index 73c8ffa..0cbe711 100644
      else()
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..872b91e 100644
+index 7330e5e..f1735d1 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
 @@ -1096,6 +1096,8 @@ static const muse_board_t s_board = {
@@ -20,19 +20,19 @@ index 7330e5e..872b91e 100644
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
      .frame_ms = 40,
 +    .avatar_px = 448,           /* 7x the 64 px grid: most of the 466 px circle */
-+    .power_wakes_only = true,   /* only the red button wakes it */
++    .power_wakes_only = true,   /* only red (power) and blue (talk) wake it */
      .init = init,
      .display_start = display_start,
      .display_lock = display_lock,
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index ddf486b..a3e8a6b 100644
+index ddf486b..220711d 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
 @@ -88,6 +88,8 @@ typedef struct {
      bool flat_menu_hints;
      int frame_ms;           /* face animation period */
      int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
-+    /* Asleep, only the power button wakes it: touch and the other keys are ignored. */
++    /* Asleep, only the power and talk buttons wake it: touch and the speaker key are ignored. */
 +    bool power_wakes_only;
  
      /* Power rails, buses, expanders. Runs first. */
@@ -402,7 +402,7 @@ index 2866f5d..129e753 100644
      s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
 diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
 new file mode 100644
-index 0000000..8fe408f
+index 0000000..6f63da2
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.c
 @@ -0,0 +1,812 @@
@@ -433,7 +433,7 @@ index 0000000..8fe408f
 +#define HOST "generativelanguage.googleapis.com"
 +#define PATH "/v1beta/interactions?alt=sse"
 +#define MODEL "gemini-3.8-flash-lite-tts"
-+#define VOICE "Achernar"
++#define VOICE "Leda"
 +#define NVS_NS "muse_tts"
 +#define NVS_KEY "gemini_key"
 +#define COMMAND "gemini_key="
@@ -1288,7 +1288,7 @@ index 0000000..4e10649
 +}
 +#endif
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 5a60abf..e4ced73 100644
+index 5a60abf..7e47c61 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -45,6 +45,9 @@
@@ -1310,7 +1310,18 @@ index 5a60abf..e4ced73 100644
  #define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles phone setup */
  
  #define GOODBYE_MS 1500        /* let the goodbye animation play */
-@@ -135,6 +138,11 @@ static void set_asleep(bool asleep, const char *why)
+@@ -80,6 +83,10 @@ static QueueHandle_t s_queue;
+ static bool (*s_console_hook)(const char *line);
+ static TaskHandle_t s_input;
+ static bool s_talk_down;
++/* Asleep with power_wakes_only: talk was pressed, and it wakes only if still held after HOLD_WAKE_MS. */
++static bool s_hold_pending;
++static TickType_t s_hold_since;
++#define HOLD_WAKE_MS 300
+ static bool s_cpu_low;      /* display stopped and the CPU allowed to sleep */
+ static volatile bool s_power_off_requested;
+ static bool s_cpu_pd;       /* muse_input_power_init() holds the CPU's retention memory */
+@@ -135,6 +142,11 @@ static void set_asleep(bool asleep, const char *why)
          if (!asleep && !muse_wifi_connected()) {
              muse_wifi_apply();   /* the screen says reconnecting: don't sit out the backoff */
          }
@@ -1322,16 +1333,47 @@ index 5a60abf..e4ced73 100644
      }
  }
  
-@@ -267,6 +275,8 @@ static void talk_button(unsigned ev)
+@@ -267,6 +279,10 @@ static void talk_button(unsigned ev)
              /* Confirmed a Muse app pairing (Link's setup button). */
              muse_state_poke();
              swallow = true;
 +        } else if (muse_state_asleep() && muse_board->power_wakes_only) {
-+            swallow = true;   /* asleep, only the power button wakes */
++            /* A click stays asleep; a hold wakes it and listens (check_hold). */
++            s_hold_pending = true;
++            s_hold_since = xTaskGetTickCount();
          } else if (muse_state_asleep()) {
              set_asleep(false, muse_board->talk_button);
              post(MUSE_PTT_DOWN, true);
-@@ -470,6 +480,29 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+@@ -286,6 +302,10 @@ static void talk_button(unsigned ev)
+         }
+         talk_down = swallow = false;
+     }
++    if (s_hold_pending && released) {
++        s_hold_pending = false;   /* let go before HOLD_WAKE_MS: a click, it stays asleep */
++        ESP_LOGI(TAG, "talk clicked while asleep: ignored (hold to talk)");
++    }
+ #if CONFIG_MUSE_WATCHER_CAMERA
+     if (saw_release && !swallow) {
+         last_release = xTaskGetTickCount();
+@@ -294,6 +314,17 @@ static void talk_button(unsigned ev)
+     s_talk_down = talk_down;
+ }
+ 
++/* Talk still held HOLD_WAKE_MS after a press while asleep: wake and listen. */
++static void check_hold(TickType_t now)
++{
++    if (s_hold_pending && now - s_hold_since >= pdMS_TO_TICKS(HOLD_WAKE_MS)) {
++        s_hold_pending = false;
++        set_asleep(false, muse_board->talk_button);
++        post(MUSE_PTT_DOWN, true);
++        s_talk_down = true;
++    }
++}
++
+ /* Keyboard menus don't repurpose Space/GO as Select. Navigation wakes the
+  * screen without accidentally changing a setting; Enter can confirm pairing. */
+ static void keyboard_buttons(unsigned ev)
+@@ -470,6 +501,29 @@ static bool update_wifi_nap(TickType_t now, bool paused)
      return napping;
  }
  
@@ -1361,25 +1403,32 @@ index 5a60abf..e4ced73 100644
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
   * click. LONG is supplied by the board only after a validated hold. */
  static bool s_power_down, s_power_swallow;
-@@ -504,7 +537,9 @@ static void dedicated_buttons(unsigned ev)
+@@ -504,7 +558,9 @@ static void dedicated_buttons(unsigned ev)
      if (release) power_release();
      if (ev & MUSE_BTN_SPEAKER_PRESS) {
          muse_state_poke();
 -        if (muse_state_asleep()) {
 +        if (muse_state_asleep() && muse_board->power_wakes_only) {
-+            /* asleep, only the power button wakes */
++            /* asleep, only power and talk wake it */
 +        } else if (muse_state_asleep()) {
              set_asleep(false, muse_board->speaker_button);   /* wake-only press */
          } else if (muse_state_mode(NULL) != MUSE_MODE_OFF) {
              bool on = !muse_settings_speaker_on();
-@@ -579,6 +614,7 @@ static void input_task(void *arg)
+@@ -579,11 +635,13 @@ static void input_task(void *arg)
  
          paused = update_power();
          bool napping = update_wifi_nap(now, paused);
 +        check_auto_off(now);
++        check_hold(now);
          muse_battery_note_state(muse_state_asleep(), s_cpu_low);
          /* Paused, anything but a button (a pairing prompt, an image) is
           * noticed within REST_WAIT_MS. Napping, nothing comes over the
+          * network; USB power arriving is noticed within NAP_WAIT_MS. */
+-        if (paused && muse_board->wait_buttons) {
++        if (paused && muse_board->wait_buttons && !s_hold_pending) {
+             muse_board->wait_buttons(napping ? NAP_WAIT_MS : REST_WAIT_MS);
+         } else {
+             vTaskDelay(pdMS_TO_TICKS(paused ? REST_POLL_MS : POLL_MS));
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
 index 4b0dda9..9ac91f3 100644
 --- a/esp32/components/muse/muse_settings.c
@@ -1505,7 +1554,7 @@ index 6a372ac..f8dc332 100644
  
  /* ---------- Battery ---------- */
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..2780b5b 100644
+index d0d4e2f..be826f3 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -906,6 +906,11 @@ static void build_screen(void)
@@ -1525,7 +1574,7 @@ index d0d4e2f..2780b5b 100644
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
 +        if (muse_board->power_wakes_only && muse_state_asleep()) {
-+            return;   /* the cover swallows it: only the power button wakes */
++            return;   /* the cover swallows it: only the power and talk buttons wake */
 +        }
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
