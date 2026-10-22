@@ -84,6 +84,12 @@ apply_patches() {
         cp "$REPO_ROOT/avatar/muse_pixel.c" "$SDK_DIR/esp32/components/muse/avatar/muse_pixel.c"
         log "using avatar/muse_pixel.c"
     fi
+    # The MOBOT tape label (avatar/make_tape.py makes it).
+    if [ -f "$REPO_ROOT/avatar/tape.rgb565a8" ]; then
+        mkdir -p "$SDK_DIR/esp32/components/muse/tape"
+        cp "$REPO_ROOT/avatar/tape.rgb565a8" "$SDK_DIR/esp32/components/muse/tape/tape.rgb565a8"
+        log "using avatar/tape.rgb565a8"
+    fi
 }
 
 # --- ESP-IDF v6.0.1 -----------------------------------------------------------

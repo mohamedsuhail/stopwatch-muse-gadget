@@ -14,11 +14,12 @@ On top of the stock SDK, this repo adds:
 - **Spoken replies.** At the pinned commit the SDK shows Muse's replies as text only, with no
   speech. This repo sends each reply to Google's Gemini TTS (`gemini-3.8-flash-lite-tts`, voice
   **Leda**) and plays the audio on the watch's speaker. This needs a Gemini API key (step 5).
-- **A custom avatar.** A toy astronaut (`avatar/muse_pixel.c`), drawn at 448 px so it fills most of
-  the round screen.
+- **A custom avatar.** A toy astronaut (`avatar/muse_pixel.c`), drawn at 384 px.
+- **A cleaner screen.** Montserrat text on soft dark bands, a bold state word in sentence case, and
+  Wi-Fi inside a battery ring at 3 o'clock. The rim icons and the top status line are gone, and a
+  worn white painter's-tape "MOBOT" label sits across the top-left.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
   asleep on battery for a while.
-- **Battery ring.** The charge shows in the bottom-right corner.
 - **Button-only wake.** While asleep, red wakes the watch, and holding blue wakes it and listens.
   Taps on the screen and a quick click of blue are ignored.
 
@@ -55,7 +56,8 @@ This does four things:
 
 1. Clones the SDK at the pinned commit into `.sdk/muse-gadget-sdk` (override with `SDK_DIR`).
 2. Applies every `patches/*.patch` to it. A patch that's already applied is skipped.
-3. Copies `avatar/muse_pixel.c` into the SDK's custom-avatar slot.
+3. Copies `avatar/muse_pixel.c` into the SDK's custom-avatar slot, and `avatar/tape.rgb565a8` into
+   `components/muse/tape/`.
 4. Runs `tools/muse/board.sh build stopwatch` from the SDK's `esp32/` directory.
 
 `board.sh build stopwatch` sets the IDF target to `esp32s3` and
@@ -245,8 +247,9 @@ cd .sdk/muse-gadget-sdk/esp32
 python3 tools/muse/make_gifs.py --src ../../../avatar/muse_pixel.c /tmp/avatar_gifs   # needs Pillow
 ```
 
-The board file sets `.avatar_px = 448` (7× the 64 px grid). `muse_ui.c` centres a canvas that tall,
-and the level meter and captions draw over its lower rows.
+The board file sets `.avatar_px = 384` (6× the 64 px grid), which leaves room for the tape label
+and the text. A canvas taller than the space above the captions is kept on screen, and the level
+meter and captions draw over its lower rows (`muse_ui.c`).
 
 ### Battery and sleep
 
@@ -277,19 +280,40 @@ reason.
 audio in a memory-only ring buffer. That way the first word isn't clipped when you press talk.
 Nothing leaves the watch until you hold the blue button.
 
-### Battery ring
+### Screen
 
-A ring in the bottom-right corner, mirroring the PWR label, shows the charge, with the percentage
-inside.
+**Battery and Wi-Fi ring.** A ring at 3 o'clock with the Wi-Fi symbol inside.
 
-- **Colour:** green above 30%, yellow from 15 to 30%, red below 15%.
-- **Charging:** green, with a lightning bolt.
-- **Updates:** once a second. It's hidden when the watch can't read the battery.
-- **Code:** the board file places it (`.battery_ring = { LV_ALIGN_CENTER, 144, 110 }`), and
-  `update_power()` in `muse_ui.c` draws it. `avatar/battery-preview.png` shows the four states.
+- **Charge:** the ring's fill. Green above 30%, yellow from 15 to 30%, red below 15%, green while
+  charging.
+- **Wi-Fi symbol:** steady when connected, blinking while joining.
+- **Updates:** once a second. The ring is hidden when the watch can't read the battery.
+- **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 180, 0 }`). Setting it also
+  hides the SDK's top status line (Wi-Fi, Bluetooth and battery text).
 
-The SDK's own "BATTERY 85%" text in the top status line is still there, but the 448 px avatar now
-covers it.
+**Hidden rim icons.** `.hide_rim_hints = true` hides the mic, speaker and power icons beside the
+buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
+
+**Text.**
+
+- **Font:** replies and captions use Montserrat 20 (`caption_font()`). For characters Montserrat
+  lacks, it falls back to the pixel font.
+- **State word:** "Listening", "Thinking" and so on are in Montserrat Bold 20
+  (`components/muse/fonts/muse_font_bold_20.c`, made with `lv_font_conv`, SIL OFL).
+- **Sentence case:** all-caps states and status lines are shown in sentence case ("SPEAKER ON"
+  becomes "Speaker on"; `sentence_case()`). Muse, Wi-Fi and USB keep their capitals. Muse's replies
+  are left as written.
+- **Scrim:** a soft dark band (black, about 65% opaque, rounded) sits behind the state word,
+  captions and replies, so they read clearly over the avatar.
+
+**Tape label.** `.tape_label = true` draws "MOBOT" on worn white painter's tape across the
+top-left: grime, smudges, rubbed marker, and "A7·22·10·K" (22 Oct) in blue ballpoint. It's one
+image drawn over everything, like tape on the glass.
+
+- **Files:** `avatar/make_tape.py` (with `avatar/tape_art.py`) generates `avatar/tape.rgb565a8`,
+  which `build.sh` copies into the SDK and the firmware embeds. `avatar/tape.png` is a preview.
+- **Regenerating it:** needs Pillow and Permanent Marker (Apache 2.0, Google Fonts):
+  `python3 avatar/make_tape.py FONTS_DIR`.
 
 ### Wake
 
@@ -309,12 +333,16 @@ stopwatch-muse-gadget/
 │   ├── build.sh          # clone pinned SDK, apply patches + avatar, build stopwatch firmware
 │   └── flash.sh          # factory backup + flash
 ├── patches/
-│   └── 0001-stopwatch-customizations.patch   # Gemini TTS, 448 px avatar, battery, wake
+│   └── 0001-stopwatch-customizations.patch   # speech, screen, battery, wake
 ├── avatar/
 │   ├── muse_pixel.c      # the astronaut avatar renderer
 │   ├── preview.png       # every state, enlarged
 │   ├── battery-preview.png  # the battery ring at 85%, 25%, 8% and charging
-│   └── size-options.png  # on-screen size options compared
+│   ├── size-options.png  # on-screen size options compared
+│   ├── make_tape.py      # generates the MOBOT tape label (with tape_art.py)
+│   ├── tape.rgb565a8     # the tape label the firmware embeds
+│   ├── tape.png          # ...and a preview of it
+│   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
 │   └── token.md          # SDK token and Gemini key: how to set them, never-commit rules
