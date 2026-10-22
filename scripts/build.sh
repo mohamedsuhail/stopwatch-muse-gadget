@@ -63,6 +63,29 @@ sync_sdk() {
         || die "expected $SDK_DIR/esp32/tools/muse/board.sh but it is missing."
 }
 
+# --- Local patches on top of the pinned SDK -----------------------------------
+
+apply_patches() {
+    local p
+    for p in "$REPO_ROOT"/patches/*.patch; do
+        [ -f "$p" ] || continue
+        if git -C "$SDK_DIR" apply --reverse --check "$p" 2>/dev/null; then
+            log "patch already applied: $(basename "$p")"
+        elif git -C "$SDK_DIR" apply --check "$p" 2>/dev/null; then
+            log "applying patch: $(basename "$p")"
+            git -C "$SDK_DIR" apply "$p"
+        else
+            die "patch $(basename "$p") doesn't apply to $SDK_DIR. Discard local SDK changes (git -C $SDK_DIR checkout . && git -C $SDK_DIR clean -fd) and re-run."
+        fi
+    done
+    # Our avatar (the SDK keeps custom avatars in a gitignored directory).
+    if [ -f "$REPO_ROOT/avatar/muse_pixel.c" ]; then
+        mkdir -p "$SDK_DIR/esp32/components/muse/avatar"
+        cp "$REPO_ROOT/avatar/muse_pixel.c" "$SDK_DIR/esp32/components/muse/avatar/muse_pixel.c"
+        log "using avatar/muse_pixel.c"
+    fi
+}
+
 # --- ESP-IDF v6.0.1 -----------------------------------------------------------
 
 version_matches() {
@@ -138,6 +161,7 @@ run_board() {
 # --- Main -----------------------------------------------------------------------
 
 sync_sdk
+apply_patches
 ensure_idf
 
 cd "$SDK_DIR/esp32"

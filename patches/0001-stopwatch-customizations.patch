@@ -1,0 +1,981 @@
+diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
+index 73c8ffa..0cbe711 100644
+--- a/esp32/components/muse/CMakeLists.txt
++++ b/esp32/components/muse/CMakeLists.txt
+@@ -43,7 +43,7 @@ if(CONFIG_MUSE_ENABLED)
+         "muse_link.c"
+         "muse_ble.c")
+     if(CONFIG_MUSE_HATCH)
+-        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
++        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_gemini_tts.c")
+         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
+     else()
+         list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
+diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
+index 7330e5e..872b91e 100644
+--- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
++++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
+@@ -1096,6 +1096,8 @@ static const muse_board_t s_board = {
+     .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
+     .power_hint = { LV_ALIGN_CENTER, -144, 110 },
+     .frame_ms = 40,
++    .avatar_px = 448,           /* 7x the 64 px grid: most of the 466 px circle */
++    .power_wakes_only = true,   /* only the red button wakes it */
+     .init = init,
+     .display_start = display_start,
+     .display_lock = display_lock,
+diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
+index ddf486b..a3e8a6b 100644
+--- a/esp32/components/muse/muse_board.h
++++ b/esp32/components/muse/muse_board.h
+@@ -88,6 +88,8 @@ typedef struct {
+     bool flat_menu_hints;
+     int frame_ms;           /* face animation period */
+     int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
++    /* Asleep, only the power button wakes it: touch and the other keys are ignored. */
++    bool power_wakes_only;
+ 
+     /* Power rails, buses, expanders. Runs first. */
+     esp_err_t (*init)(void);
+diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
+index 2866f5d..4bc55c6 100644
+--- a/esp32/components/muse/muse_chat_session.cpp
++++ b/esp32/components/muse/muse_chat_session.cpp
+@@ -67,6 +67,7 @@ extern "C" {
+ #include "cJSON.h"
+ #include "minimp3.h"
+ #include "muse_account_api.h"
++#include "muse_gemini_tts.h"
+ #include "muse_link.h"
+ #include "muse_settings.h"
+ #include "muse_wifi.h"
+@@ -152,6 +153,7 @@ struct ev_t {
+ 
+ static QueueHandle_t s_cmds, s_events;
+ static StreamBufferHandle_t s_in, s_out;
++static StreamBufferHandle_t s_tts_pcm;   /* Gemini speech on its way to s_out */
+ static std::atomic<uint32_t> s_gen{0};
+ static std::atomic<bool> s_resting{false};
+ 
+@@ -244,6 +246,7 @@ struct turn_t {
+     /* TTS */
+     int tts_msg;             /* message being fetched (or shown, speaker off), or -1 */
+     bool silent;             /* speaker off: tts_msg is paced by silence, not fetched */
++    bool gemini;             /* tts_msg is spoken by Gemini (muse_gemini_tts) */
+     uint8_t *mp3;            /* MP3_BUF */
+     size_t mp3_len;
+     bool mp3_ended;
+@@ -963,6 +966,10 @@ static void turn_finish(void)
+     turn_reset_streams();
+     s_turn.phase = P_IDLE;
+     s_turn.dict_id = s_turn.chat_id = 0;
++    if (s_turn.gemini) {
++        muse_gemini_tts_cancel();
++        s_turn.gemini = false;
++    }
+     s_turn.tts_msg = -1;
+     s_turn.silent = false;
+     s_turn.mp3_len = 0;
+@@ -1534,9 +1541,22 @@ static void start_tts(void)
+          * and finishes the message once it's drained.
+          */
+         m.pcm_start = s_turn.pcm_out;
+-        m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
+         m.tts = TTS_ACTIVE;
+         s_turn.tts_msg = i;
++        /* Speaker on and a Gemini key set: speak it. Otherwise, or if the request can't start, captions. */
++        if (muse_settings_speaker_on() && s_turn.texts && s_tts_pcm && muse_gemini_tts_configured()) {
++            xStreamBufferReset(s_tts_pcm);
++            if (muse_gemini_tts_start(s_turn.texts + i * TEXT_MAX, s_tts_pcm)) {
++                m.pcm_frames = (uint32_t)(m.len * MIC_RATE / SPEECH_CHARS_PER_S);   /* until it's all in */
++                s_turn.gemini = true;
++                s_turn.silent = false;
++                ESP_LOGI(TAG, "speaking message %s (%u chars) with Gemini", m.id, (unsigned)m.len);
++                show_reply_start(m);
++                return;
++            }
++            ESP_LOGW(TAG, "Gemini TTS didn't start; showing the reply instead");
++        }
++        m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
+         s_turn.silent = true;
+         ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
+         show_reply_start(m);
+@@ -1588,12 +1608,68 @@ static void pace_silently(void)
+     }
+ }
+ 
++/* Moves Gemini's PCM on to the voice task while the reply buffer has room. */
++static void pump_gemini(void)
++{
++    static uint8_t odd[1];      /* a frame split across reads */
++    static bool have_odd;
++    msg_t &m = s_turn.msgs[s_turn.tts_msg];
++    uint8_t *buf = reinterpret_cast<uint8_t *>(s_pcm16);
++    const size_t cap = MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t);
++    muse_gemini_tts_state_t st = muse_gemini_tts_state();
++    for (;;) {
++        size_t room = xStreamBufferSpacesAvailable(s_out);
++        if (room < 2) {
++            break;
++        }
++        size_t want = (room < cap ? room : cap) - (have_odd ? 1 : 0);
++        size_t got = xStreamBufferReceive(s_tts_pcm, buf + (have_odd ? 1 : 0), want, 0);
++        if (!got) {
++            break;
++        }
++        if (have_odd) {
++            buf[0] = odd[0];
++            got++;
++            have_odd = false;
++        }
++        if (got & 1) {
++            odd[0] = buf[--got];
++            have_odd = true;
++        }
++        if (s_turn.gen == s_gen.load()) {
++            mark(M_AUDIO);
++            xStreamBufferSend(s_out, buf, got, 0);
++        }
++        s_turn.pcm_out += got / 2;
++    }
++    bool drained = !xStreamBufferBytesAvailable(s_tts_pcm);
++    if (st == MUSE_GEMINI_TTS_DONE && drained) {
++        have_odd = false;
++        m.pcm_frames = s_turn.pcm_out - m.pcm_start;
++        m.tts = TTS_FINISHED;
++        s_turn.tts_msg = -1;
++        s_turn.gemini = false;
++    } else if (st == MUSE_GEMINI_TTS_FAILED || st == MUSE_GEMINI_TTS_IDLE) {
++        /* No speech came: show the reply at reading pace instead. */
++        have_odd = false;
++        ESP_LOGW(TAG, "no speech from Gemini; showing the reply");
++        s_turn.gemini = false;
++        s_turn.silent = true;
++        m.pcm_start = s_turn.pcm_out;
++        m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
++    }
++}
++
+ /* Decodes buffered MP3 while the reply buffer has room. */
+ static void decode(void)
+ {
+     if (s_turn.tts_msg < 0) {
+         return;
+     }
++    if (s_turn.gemini) {
++        pump_gemini();
++        return;
++    }
+     if (s_turn.silent) {
+         pace_silently();
+         return;
+@@ -2058,6 +2134,7 @@ extern "C" void muse_hatch_start(void)
+     }
+     s_in = xStreamBufferCreateWithCaps(IN_BYTES, 1, MALLOC_CAP_SPIRAM);
+     s_out = xStreamBufferCreateWithCaps(OUT_BYTES, 1, MALLOC_CAP_SPIRAM);
++    s_tts_pcm = xStreamBufferCreateWithCaps(MIC_RATE * 2 * 4, 1, MALLOC_CAP_SPIRAM);   /* 4 s; spoken replies are off without it */
+     s_turn.chunk = static_cast<uint8_t *>(psram_alloc(DICT_CHUNK_BYTES + sizeof(MUSE_HATCH_NOTE_TAIL)));
+     s_turn.mp3 = static_cast<uint8_t *>(psram_alloc(MP3_BUF));
+     s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
+diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
+new file mode 100644
+index 0000000..f8194d2
+--- /dev/null
++++ b/esp32/components/muse/muse_gemini_tts.c
+@@ -0,0 +1,469 @@
++#include "muse_gemini_tts.h"
++
++#include <stdatomic.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "cJSON.h"
++#include "esp_crt_bundle.h"
++#include "esp_heap_caps.h"
++#include "esp_http_client.h"
++#include "esp_log.h"
++#include "esp_timer.h"
++#include "freertos/idf_additions.h"
++#include "freertos/task.h"
++#include "mbedtls/base64.h"
++#include "nvs.h"
++
++static const char *TAG = "muse_gemini_tts";
++
++#define URL "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse"
++#define MODEL "gemini-3.8-flash-lite-tts"
++#define VOICE "Achernar"
++#define NVS_NS "muse_tts"
++#define NVS_KEY "gemini_key"
++#define COMMAND "gemini_key="
++#define KEY_MAX 128
++#define SSE_LINE_MAX (256 * 1024)        /* one SSE event; its base64 audio grows it */
++#define READ_CHUNK 4096
++#define SEND_WAIT_MS 50              /* blocked on a full reply buffer, look for cancel this often */
++#define STACK (8 * 1024)
++
++static char s_key[KEY_MAX];
++static bool s_key_loaded;
++static _Atomic int s_state = MUSE_GEMINI_TTS_IDLE;
++static atomic_bool s_cancel;
++static atomic_bool s_busy;           /* the task exists, even when cancelled */
++
++typedef struct {
++    char *text;
++    StreamBufferHandle_t out;
++    char *line;
++    size_t line_len;
++    bool line_overflow;
++    size_t pcm_bytes;
++    bool failed;
++    /* Down to the speaker's rate: the API sends 24 kHz whatever sample_rate asks for. */
++    int rate;                /* the audio's, from each delta */
++    uint32_t step;           /* Q16 input samples per output sample */
++    uint32_t pos;            /* Q16 position of the next output past x0 */
++    int16_t x0;              /* last filtered input sample */
++    int16_t h1, h2;          /* the low-pass filter's history */
++    int primed;              /* input samples seen, up to 3 */
++    uint8_t odd;             /* a sample split across deltas */
++    bool have_odd;
++} job_t;
++
++/* --- key ------------------------------------------------------------------ */
++
++static void load_key(void)
++{
++    if (s_key_loaded) {
++        return;
++    }
++    s_key_loaded = true;
++    s_key[0] = '\0';
++    nvs_handle_t h;
++    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
++        return;
++    }
++    size_t len = sizeof(s_key);
++    if (nvs_get_str(h, NVS_KEY, s_key, &len) != ESP_OK) {
++        s_key[0] = '\0';
++    }
++    nvs_close(h);
++}
++
++bool muse_gemini_tts_configured(void)
++{
++    load_key();
++    return s_key[0] != '\0';
++}
++
++static bool key_valid(const char *k)
++{
++    size_t n = strlen(k);
++    if (n < 20 || n >= KEY_MAX) {
++        return false;
++    }
++    for (size_t i = 0; i < n; i++) {
++        char c = k[i];
++        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
++              c == '.')) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool muse_gemini_tts_console_command(const char *line)
++{
++    if (strncmp(line, COMMAND, strlen(COMMAND)) != 0) {
++        return false;
++    }
++    const char *key = line + strlen(COMMAND);
++    if (key[0] && !key_valid(key)) {
++        printf("@gemini_key error invalid\n");
++        fflush(stdout);
++        return true;
++    }
++    nvs_handle_t h;
++    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
++    if (err == ESP_OK) {
++        err = key[0] ? nvs_set_str(h, NVS_KEY, key) : nvs_erase_key(h, NVS_KEY);
++        if (err == ESP_ERR_NVS_NOT_FOUND) {
++            err = ESP_OK;   /* clearing a key that wasn't there */
++        }
++        if (err == ESP_OK) {
++            err = nvs_commit(h);
++        }
++        nvs_close(h);
++    }
++    if (err != ESP_OK) {
++        ESP_LOGE(TAG, "couldn't store the key: %s", esp_err_to_name(err));
++        printf("@gemini_key error storage\n");
++        fflush(stdout);
++        return true;
++    }
++    strlcpy(s_key, key, sizeof(s_key));
++    s_key_loaded = true;
++    /* Never log the key itself. */
++    ESP_LOGI(TAG, "%s", key[0] ? "Gemini key stored; replies will be spoken" : "Gemini key cleared; replies are captions only");
++    printf(key[0] ? "@gemini_key ok\n" : "@gemini_key cleared\n");
++    fflush(stdout);
++    return true;
++}
++
++/* --- response ---------------------------------------------------------------- */
++
++static void put_pcm(job_t *j, const uint8_t *pcm, size_t n)
++{
++    while (n && !atomic_load(&s_cancel)) {
++        size_t sent = xStreamBufferSend(j->out, pcm, n, pdMS_TO_TICKS(SEND_WAIT_MS));
++        pcm += sent;
++        n -= sent;
++        j->pcm_bytes += sent;
++    }
++}
++
++/* One input sample: a [1 2 1]/4 low-pass, then linear interpolation down to 16 kHz. */
++static size_t resample_one(job_t *j, int16_t x, int16_t *out)
++{
++    int32_t y = ((int32_t)j->h2 + 2 * j->h1 + x) / 4;   /* centred on h1 */
++    j->h2 = j->h1;
++    j->h1 = x;
++    if (j->primed < 3) {
++        if (++j->primed == 3) {
++            j->x0 = (int16_t)y;
++            j->pos = 0;
++        }
++        return 0;
++    }
++    size_t n = 0;
++    while (j->pos < 65536) {
++        out[n++] = (int16_t)(j->x0 + (int32_t)(((int64_t)(y - j->x0) * j->pos) >> 16));
++        j->pos += j->step;
++    }
++    j->pos -= 65536;
++    j->x0 = (int16_t)y;
++    return n;
++}
++
++static void put_audio(job_t *j, const uint8_t *bytes, size_t len, int rate)
++{
++    if (rate <= 0) {
++        rate = 24000;
++    }
++    if (rate != j->rate) {
++        if (j->rate) {
++            ESP_LOGW(TAG, "audio rate changed %d -> %d Hz", j->rate, rate);
++        } else {
++            ESP_LOGI(TAG, "reply audio: %d Hz", rate);
++        }
++        j->rate = rate;
++        j->step = (uint32_t)(((uint64_t)rate << 16) / MUSE_GEMINI_TTS_RATE);
++    }
++    int16_t out[64];
++    size_t n = 0;
++    for (size_t i = 0; i < len && !atomic_load(&s_cancel); i++) {
++        if (!j->have_odd) {
++            j->odd = bytes[i];
++            j->have_odd = true;
++            continue;
++        }
++        int16_t x = (int16_t)(j->odd | bytes[i] << 8);   /* little-endian */
++        j->have_odd = false;
++        if (rate == MUSE_GEMINI_TTS_RATE) {
++            out[n++] = x;
++        } else {
++            n += resample_one(j, x, out + n);
++        }
++        if (n > 60) {
++            put_pcm(j, (const uint8_t *)out, n * sizeof(int16_t));
++            n = 0;
++        }
++    }
++    if (n) {
++        put_pcm(j, (const uint8_t *)out, n * sizeof(int16_t));
++    }
++}
++
++static void put_base64(job_t *j, const char *b64, int rate)
++{
++    size_t in = strlen(b64);
++    if (!in) {
++        return;
++    }
++    size_t cap = in / 4 * 3 + 3;
++    uint8_t *pcm = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!pcm) {
++        ESP_LOGW(TAG, "no memory for %u bytes of audio", (unsigned)cap);
++        j->failed = true;
++        return;
++    }
++    size_t out = 0;
++    if (mbedtls_base64_decode(pcm, cap, &out, (const unsigned char *)b64, in) == 0) {
++        put_audio(j, pcm, out, rate);
++    } else {
++        ESP_LOGW(TAG, "bad base64 audio");
++    }
++    free(pcm);
++}
++
++/*
++ * Any object shaped {"type": "audio", "data": "<base64>"} anywhere in the
++ * event: a stream's step.delta, or a whole model_output.
++ */
++static void find_audio(job_t *j, const cJSON *node)
++{
++    if (!node || atomic_load(&s_cancel)) {
++        return;
++    }
++    if (cJSON_IsObject(node)) {
++        const cJSON *type = cJSON_GetObjectItemCaseSensitive(node, "type");
++        const cJSON *data = cJSON_GetObjectItemCaseSensitive(node, "data");
++        if (cJSON_IsString(type) && !strcmp(type->valuestring, "audio") && cJSON_IsString(data)) {
++            const cJSON *rate = cJSON_GetObjectItemCaseSensitive(node, "sample_rate");
++            put_base64(j, data->valuestring, cJSON_IsNumber(rate) ? rate->valueint : 0);
++            return;
++        }
++    }
++    for (const cJSON *c = node->child; c; c = c->next) {
++        find_audio(j, c);
++    }
++}
++
++static void on_event(job_t *j, char *json)
++{
++    if (!strcmp(json, "[DONE]")) {
++        return;
++    }
++    cJSON *ev = cJSON_Parse(json);
++    if (!ev) {
++        ESP_LOGW(TAG, "unparsable event (%u bytes)", (unsigned)strlen(json));
++        return;
++    }
++    const cJSON *err = cJSON_GetObjectItemCaseSensitive(ev, "error");
++    if (err) {
++        const cJSON *msg = cJSON_GetObjectItemCaseSensitive(err, "message");
++        ESP_LOGW(TAG, "API error: %s", cJSON_IsString(msg) ? msg->valuestring : "(no message)");
++        j->failed = true;
++    } else {
++        find_audio(j, ev);
++    }
++    cJSON_Delete(ev);
++}
++
++/* Splits the body into SSE lines and hands each "data:" payload on. */
++static void feed(job_t *j, const char *buf, size_t n)
++{
++    for (size_t i = 0; i < n; i++) {
++        char c = buf[i];
++        if (c == '\r') {
++            continue;
++        }
++        if (c != '\n') {
++            if (j->line_len < SSE_LINE_MAX - 1) {
++                j->line[j->line_len++] = c;
++            } else {
++                j->line_overflow = true;
++            }
++            continue;
++        }
++        j->line[j->line_len] = '\0';
++        if (j->line_overflow) {
++            ESP_LOGW(TAG, "event over %u bytes dropped", (unsigned)SSE_LINE_MAX);
++        } else if (!strncmp(j->line, "data:", 5)) {
++            char *p = j->line + 5;
++            while (*p == ' ') {
++                p++;
++            }
++            on_event(j, p);
++        }
++        j->line_len = 0;
++        j->line_overflow = false;
++    }
++}
++
++/* --- request ------------------------------------------------------------------ */
++
++static char *request_body(const char *text)
++{
++    cJSON *root = cJSON_CreateObject();
++    cJSON_AddStringToObject(root, "model", MODEL);
++    cJSON *input = cJSON_AddArrayToObject(root, "input");
++    cJSON *turn = cJSON_CreateObject();
++    cJSON_AddStringToObject(turn, "type", "user_input");
++    cJSON *content = cJSON_AddArrayToObject(turn, "content");
++    cJSON *part = cJSON_CreateObject();
++    cJSON_AddStringToObject(part, "type", "text");
++    cJSON_AddStringToObject(part, "text", text);
++    cJSON_AddItemToArray(content, part);
++    cJSON_AddItemToArray(input, turn);
++    cJSON *fmt = cJSON_AddObjectToObject(root, "response_format");
++    cJSON_AddStringToObject(fmt, "type", "audio");
++    cJSON_AddStringToObject(fmt, "mime_type", "audio/l16");
++    cJSON_AddNumberToObject(fmt, "sample_rate", MUSE_GEMINI_TTS_RATE);
++    cJSON *gen = cJSON_AddObjectToObject(root, "generation_config");
++    cJSON *speech = cJSON_AddArrayToObject(gen, "speech_config");
++    cJSON *voice = cJSON_CreateObject();
++    cJSON_AddStringToObject(voice, "voice", VOICE);
++    cJSON_AddItemToArray(speech, voice);
++    cJSON_AddBoolToObject(root, "stream", true);
++    char *body = cJSON_PrintUnformatted(root);
++    cJSON_Delete(root);
++    return body;
++}
++
++static void run(job_t *j)
++{
++    char *body = request_body(j->text);
++    if (!body) {
++        j->failed = true;
++        return;
++    }
++    esp_http_client_config_t cfg = {
++        .url = URL,
++        .method = HTTP_METHOD_POST,
++        .timeout_ms = 20000,
++        .buffer_size = READ_CHUNK,
++        .buffer_size_tx = 2048,
++        .crt_bundle_attach = esp_crt_bundle_attach,
++    };
++    esp_http_client_handle_t c = esp_http_client_init(&cfg);
++    if (!c) {
++        free(body);
++        j->failed = true;
++        return;
++    }
++    esp_http_client_set_header(c, "Content-Type", "application/json");
++    esp_http_client_set_header(c, "Accept", "text/event-stream");
++    esp_http_client_set_header(c, "x-goog-api-key", s_key);
++    size_t len = strlen(body);
++    esp_err_t err = esp_http_client_open(c, len);
++    if (err == ESP_OK && esp_http_client_write(c, body, len) != (int)len) {
++        err = ESP_FAIL;
++    }
++    free(body);
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "can't reach the Gemini API: %s", esp_err_to_name(err));
++        j->failed = true;
++        esp_http_client_cleanup(c);
++        return;
++    }
++    esp_http_client_fetch_headers(c);
++    int status = esp_http_client_get_status_code(c);
++    char *buf = heap_caps_malloc(READ_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!buf) {
++        j->failed = true;
++    } else if (status != 200) {
++        /* The error body says why (bad key, quota, model name); it never holds the key. */
++        int n = esp_http_client_read(c, buf, READ_CHUNK - 1);
++        buf[n > 0 ? n : 0] = '\0';
++        ESP_LOGW(TAG, "HTTP %d: %.400s", status, buf);
++        j->failed = true;
++    } else {
++        int n;
++        while (!atomic_load(&s_cancel) && (n = esp_http_client_read(c, buf, READ_CHUNK)) > 0) {
++            feed(j, buf, n);
++        }
++        if (n < 0 && !atomic_load(&s_cancel)) {
++            ESP_LOGW(TAG, "read failed mid-reply");
++            j->failed = true;
++        }
++        if (j->line_len) {
++            feed(j, "\n", 1);   /* a last event without its newline */
++        }
++    }
++    free(buf);
++    esp_http_client_close(c);
++    esp_http_client_cleanup(c);
++}
++
++static void tts_task(void *arg)
++{
++    job_t *j = arg;
++    int64_t t0 = esp_timer_get_time();
++    run(j);
++    bool cancelled = atomic_load(&s_cancel);
++    if (!cancelled) {
++        ESP_LOGI(TAG, "%.2fs of speech in %.2fs%s", (double)j->pcm_bytes / 2 / MUSE_GEMINI_TTS_RATE,
++                 (esp_timer_get_time() - t0) / 1e6, j->failed ? " (failed)" : "");
++    }
++    /* Some audio counts as done: play what came. */
++    int state = cancelled ? MUSE_GEMINI_TTS_IDLE
++                          : (j->pcm_bytes ? MUSE_GEMINI_TTS_DONE : MUSE_GEMINI_TTS_FAILED);
++    free(j->line);
++    free(j->text);
++    free(j);
++    atomic_store(&s_state, state);
++    atomic_store(&s_busy, false);
++    vTaskDeleteWithCaps(NULL);
++}
++
++bool muse_gemini_tts_start(const char *text, StreamBufferHandle_t out)
++{
++    if (!muse_gemini_tts_configured() || atomic_load(&s_busy)) {
++        return false;
++    }
++    job_t *j = heap_caps_calloc(1, sizeof(*j), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!j) {
++        return false;
++    }
++    j->out = out;
++    j->text = strdup(text);
++    j->line = heap_caps_malloc(SSE_LINE_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!j->text || !j->line) {
++        free(j->text);
++        free(j->line);
++        free(j);
++        return false;
++    }
++    atomic_store(&s_cancel, false);
++    atomic_store(&s_state, MUSE_GEMINI_TTS_RUNNING);
++    atomic_store(&s_busy, true);
++    if (xTaskCreatePinnedToCoreWithCaps(tts_task, "gemini_tts", STACK, j, 4, NULL, tskNO_AFFINITY,
++                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
++        atomic_store(&s_busy, false);
++        atomic_store(&s_state, MUSE_GEMINI_TTS_IDLE);
++        free(j->text);
++        free(j->line);
++        free(j);
++        return false;
++    }
++    return true;
++}
++
++muse_gemini_tts_state_t muse_gemini_tts_state(void)
++{
++    return (muse_gemini_tts_state_t)atomic_load(&s_state);
++}
++
++void muse_gemini_tts_cancel(void)
++{
++    if (atomic_load(&s_busy)) {
++        atomic_store(&s_cancel, true);
++    } else {
++        atomic_store(&s_state, MUSE_GEMINI_TTS_IDLE);
++    }
++}
+diff --git a/esp32/components/muse/muse_gemini_tts.h b/esp32/components/muse/muse_gemini_tts.h
+new file mode 100644
+index 0000000..138c5dd
+--- /dev/null
++++ b/esp32/components/muse/muse_gemini_tts.h
+@@ -0,0 +1,52 @@
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++
++#include "freertos/FreeRTOS.h"
++#include "freertos/stream_buffer.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * Spoken replies through the Gemini API (gemini-3.8-flash-lite-tts, the
++ * Interactions API, streamed). The audio comes back as headerless 16-bit
++ * little-endian mono PCM at 24 kHz (the request's sample_rate is ignored), so
++ * it's resampled to the speaker's 16 kHz on the way to the reply buffer.
++ *
++ * The API key is set over serial with the line ">gemini_key=AIza..." and kept
++ * in NVS; ">gemini_key=" with nothing after it clears it. Without a key,
++ * replies stay captions only.
++ */
++
++#define MUSE_GEMINI_TTS_RATE 16000
++
++typedef enum {
++    MUSE_GEMINI_TTS_IDLE,
++    MUSE_GEMINI_TTS_RUNNING,
++    MUSE_GEMINI_TTS_DONE,      /* all of the audio is in the stream buffer */
++    MUSE_GEMINI_TTS_FAILED,
++} muse_gemini_tts_state_t;
++
++/* Console hook for ">gemini_key=...", the line without its '>'. False if it isn't that command. */
++bool muse_gemini_tts_console_command(const char *line);
++
++/* A key is stored. */
++bool muse_gemini_tts_configured(void);
++
++/*
++ * Starts speaking `text` (copied) into `out`, PCM bytes. False if there's no
++ * key, no memory, or the last request hasn't wound down yet.
++ */
++bool muse_gemini_tts_start(const char *text, StreamBufferHandle_t out);
++
++muse_gemini_tts_state_t muse_gemini_tts_state(void);
++
++/* Stops the request in progress; the state goes back to idle once it has. */
++void muse_gemini_tts_cancel(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
+index 5a60abf..ea9a52b 100644
+--- a/esp32/components/muse/muse_input.c
++++ b/esp32/components/muse/muse_input.c
+@@ -64,7 +64,7 @@ static const char *TAG = "muse_input";
+ #define NAP_WAIT_MS 10000      /* ... and Wi-Fi napping */
+ #define POWER_MS 2000          /* refresh battery */
+ #define REST_POWER_MS 10000    /* ... while paused */
+-#define WIFI_NAP_MS (2 * 60 * 1000)   /* low power this long: Wi-Fi off until it ends */
++#define WIFI_NAP_MS (30 * 1000)       /* low power this long: Wi-Fi off until it ends */
+ #define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles phone setup */
+ 
+ #define GOODBYE_MS 1500        /* let the goodbye animation play */
+@@ -267,6 +267,8 @@ static void talk_button(unsigned ev)
+             /* Confirmed a Muse app pairing (Link's setup button). */
+             muse_state_poke();
+             swallow = true;
++        } else if (muse_state_asleep() && muse_board->power_wakes_only) {
++            swallow = true;   /* asleep, only the power button wakes */
+         } else if (muse_state_asleep()) {
+             set_asleep(false, muse_board->talk_button);
+             post(MUSE_PTT_DOWN, true);
+@@ -470,6 +472,29 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+     return napping;
+ }
+ 
++/*
++ * On battery, asleep for the Auto power-off time (Settings > Sleep): power off
++ * through the board's PMIC, the lowest drain there is. The power button turns
++ * it back on. Not while a voice note recorded offline waits to go.
++ */
++static void check_auto_off(TickType_t now)
++{
++    static TickType_t since;
++    static bool was;
++    bool resting = muse_state_asleep() && muse_state_on_battery();
++    if (resting && !was) {
++        since = now;
++    }
++    was = resting;
++    int after = muse_settings_auto_off_s();
++    if (resting && after && muse_board->power_off && !muse_voice_notes_waiting()
++        && now - since >= (TickType_t)after * configTICK_RATE_HZ) {
++        ESP_LOGI(TAG, "auto power-off: asleep on battery for %d min", after / 60);
++        was = false;
++        power_off();
++    }
++}
++
+ /* Independent POWER never goes through PTT, AUX's menu or its setup double
+  * click. LONG is supplied by the board only after a validated hold. */
+ static bool s_power_down, s_power_swallow;
+@@ -504,7 +529,9 @@ static void dedicated_buttons(unsigned ev)
+     if (release) power_release();
+     if (ev & MUSE_BTN_SPEAKER_PRESS) {
+         muse_state_poke();
+-        if (muse_state_asleep()) {
++        if (muse_state_asleep() && muse_board->power_wakes_only) {
++            /* asleep, only the power button wakes */
++        } else if (muse_state_asleep()) {
+             set_asleep(false, muse_board->speaker_button);   /* wake-only press */
+         } else if (muse_state_mode(NULL) != MUSE_MODE_OFF) {
+             bool on = !muse_settings_speaker_on();
+@@ -579,6 +606,7 @@ static void input_task(void *arg)
+ 
+         paused = update_power();
+         bool napping = update_wifi_nap(now, paused);
++        check_auto_off(now);
+         muse_battery_note_state(muse_state_asleep(), s_cpu_low);
+         /* Paused, anything but a button (a pairing prompt, an image) is
+          * noticed within REST_WAIT_MS. Napping, nothing comes over the
+diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
+index 4b0dda9..9ac91f3 100644
+--- a/esp32/components/muse/muse_settings.c
++++ b/esp32/components/muse/muse_settings.c
+@@ -37,6 +37,7 @@ static struct {
+     uint8_t mic_gain;
+     uint8_t brightness;
+     uint16_t sleep_s;
++    uint16_t auto_off_s;
+     bool wifi_on;
+     bool ble_on;
+     char ssid[MUSE_SSID_MAX + 1];
+@@ -49,7 +50,8 @@ static struct {
+     .speaker_on = true,
+     .mic_gain = 30,
+     .brightness = 100,
+-    .sleep_s = 120,
++    .sleep_s = 30,              /* short, for battery life */
++    .auto_off_s = 1800,
+     .wifi_on = true,
+     .host = DEFAULT_HOST,
+ };
+@@ -121,6 +123,7 @@ esp_err_t muse_settings_init(void)
+     load_u8("mic_gain", &s.mic_gain);
+     load_u8("bright", &s.brightness);
+     nvs_get_u16(s_nvs, "sleep_s", &s.sleep_s);
++    nvs_get_u16(s_nvs, "auto_off_s", &s.auto_off_s);
+     if (nvs_get_u8(s_nvs, "wifi_on", &b) == ESP_OK) {
+         s.wifi_on = b;
+     }
+@@ -152,6 +155,7 @@ bool muse_settings_speaker_on(void) { return s.speaker_on; }
+ int muse_settings_mic_gain(void) { return s.mic_gain; }
+ int muse_settings_brightness(void) { return s.brightness; }
+ int muse_settings_sleep_s(void) { return s.sleep_s; }
++int muse_settings_auto_off_s(void) { return s.auto_off_s; }
+ bool muse_settings_wifi_on(void) { return s.wifi_on; }
+ bool muse_settings_ble_on(void) { return s.ble_on; }
+ 
+@@ -227,6 +231,14 @@ void muse_settings_set_sleep_s(int secs)
+     notify(MUSE_SETTING_SLEEP);
+ }
+ 
++void muse_settings_set_auto_off_s(int secs)
++{
++    s.auto_off_s = clampi(secs, 0, 4 * 3600);
++    nvs_set_u16(s_nvs, "auto_off_s", s.auto_off_s);
++    nvs_commit(s_nvs);
++    notify(MUSE_SETTING_SLEEP);
++}
++
+ void muse_settings_set_wifi_on(bool on)
+ {
+     s.wifi_on = on;
+diff --git a/esp32/components/muse/muse_settings.h b/esp32/components/muse/muse_settings.h
+index 705a5cb..3aca41b 100644
+--- a/esp32/components/muse/muse_settings.h
++++ b/esp32/components/muse/muse_settings.h
+@@ -57,6 +57,7 @@ bool muse_settings_speaker_on(void);    /* off: replies are shown, not played */
+ int muse_settings_mic_gain(void);       /* dB, 0..MUSE_MIC_GAIN_MAX */
+ int muse_settings_brightness(void);     /* 10..100 */
+ int muse_settings_sleep_s(void);        /* 0 = never */
++int muse_settings_auto_off_s(void);     /* on battery, power off after this long asleep; 0 = never */
+ bool muse_settings_wifi_on(void);
+ bool muse_settings_ble_on(void);
+ 
+@@ -71,6 +72,7 @@ void muse_settings_set_speaker_on(bool on);
+ void muse_settings_set_mic_gain(int db);
+ void muse_settings_set_brightness(int pct);
+ void muse_settings_set_sleep_s(int secs);
++void muse_settings_set_auto_off_s(int secs);
+ void muse_settings_set_wifi_on(bool on);
+ void muse_settings_set_ble_on(bool on);
+ /* A network name is remembered first among the saved ones and joined now;
+diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
+index 6a372ac..f8dc332 100644
+--- a/esp32/components/muse/muse_settings_ui.c
++++ b/esp32/components/muse/muse_settings_ui.c
+@@ -103,6 +103,10 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
+ static const char *const SLEEP_NAMES[] = { "Never", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes" };
+ #define SLEEP_COUNT (int)(sizeof(SLEEP_CHOICES) / sizeof(SLEEP_CHOICES[0]))
+ static lv_obj_t *s_sleep_checks[SLEEP_COUNT];
++static const int OFF_CHOICES[] = { 0, 600, 1800, 3600, 4 * 3600 };
++static const char *const OFF_NAMES[] = { "Never", "10 minutes", "30 minutes", "1 hour", "4 hours" };
++#define OFF_COUNT (int)(sizeof(OFF_CHOICES) / sizeof(OFF_CHOICES[0]))
++static lv_obj_t *s_off_checks[OFF_COUNT];
+ 
+ /* Battery page. */
+ static lv_obj_t *s_batt_status, *s_batt_level, *s_batt_drain, *s_batt_full, *s_batt_off, *s_batt_slept, *s_batt_wakes,
+@@ -1107,6 +1111,11 @@ static void on_sleep_choice(lv_event_t *e)
+     muse_settings_set_sleep_s(SLEEP_CHOICES[(int)(intptr_t)lv_event_get_user_data(e)]);
+ }
+ 
++static void on_off_choice(lv_event_t *e)
++{
++    muse_settings_set_auto_off_s(OFF_CHOICES[(int)(intptr_t)lv_event_get_user_data(e)]);
++}
++
+ static void on_sleep_now(lv_event_t *e)
+ {
+     (void)e;
+@@ -1124,6 +1133,12 @@ static void build_sleep_page(lv_obj_t *tile)
+     }
+     button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
+     note(list, "Tap the screen or press either button to wake.");
++    note(list, "On battery, power off after sleeping for:");
++    for (int i = 0; i < OFF_COUNT; i++) {
++        row(list, NULL, OFF_NAMES[i], &s_off_checks[i], on_off_choice, (void *)(intptr_t)i);
++        lv_obj_set_style_text_color(s_off_checks[i], lv_color_hex(COLOR_ACCENT), 0);
++    }
++    note(list, "Press the red button to turn it back on.");
+ }
+ 
+ static const char *sleep_name(int secs)
+@@ -1142,6 +1157,10 @@ static void tick_sleep(void)
+     for (int i = 0; i < SLEEP_COUNT; i++) {
+         set_text(s_sleep_checks[i], SLEEP_CHOICES[i] == cur ? LV_SYMBOL_OK : "");
+     }
++    int off = muse_settings_auto_off_s();
++    for (int i = 0; i < OFF_COUNT; i++) {
++        set_text(s_off_checks[i], OFF_CHOICES[i] == off ? LV_SYMBOL_OK : "");
++    }
+ }
+ 
+ /* ---------- Battery ---------- */
+diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
+index d0d4e2f..2780b5b 100644
+--- a/esp32/components/muse/muse_ui.c
++++ b/esp32/components/muse/muse_ui.c
+@@ -906,6 +906,11 @@ static void build_screen(void)
+     int meter_y = cap_top - 6 - METER_SEG_PX / 2;
+     int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
+     s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
++    if (!s_small && s_big_y - s_canvas_px / 2 < -s_h / 2) {
++        /* Too tall to sit above the captions (a board's own avatar_px): keep it
++         * on screen and let the meter and captions overlay its lower rows. */
++        s_big_y = -(s_h - s_canvas_px) / 2;
++    }
+ 
+     /* The character. */
+     muse_image_init();
+@@ -1010,6 +1015,9 @@ static void build_screen(void)
+ static void on_cover_event(lv_event_t *e)
+ {
+     if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
++        if (muse_board->power_wakes_only && muse_state_asleep()) {
++            return;   /* the cover swallows it: only the power button wakes */
++        }
+         /* Wake on touch; keep the (now clear) cover until release so the tap
+          * doesn't land on whatever is underneath. */
+         muse_state_set_asleep(false);
+diff --git a/esp32/devices/sdkconfig.muse-m5stack-stopwatch b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
+index 3aef13f..268ea4c 100644
+--- a/esp32/devices/sdkconfig.muse-m5stack-stopwatch
++++ b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
+@@ -68,3 +68,6 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+ # actually slept, and how long each power lock kept the chip awake.
+ CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+ CONFIG_PM_PROFILING=y
++
++# Gemini TTS: Google serves GTS Root R4 cross-signed by GlobalSign; verify it against the bundled R4.
++CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
+index 29d4d8b..87a70d3 100644
+--- a/esp32/main/muse_glue.c
++++ b/esp32/main/muse_glue.c
+@@ -34,6 +34,9 @@
+ #include "identity.h"
+ #include "noise_control.h"
+ #include "sdk_token_console.h"
++#if CONFIG_MUSE_HATCH
++#include "muse_gemini_tts.h"
++#endif
+ #include "stack_monitor.h"
+ #include "wifi_known.h"
+ #include "wifi_mgr.h"
+@@ -629,13 +632,21 @@ static void boot_task(void *arg) {
+     vTaskDelete(NULL);
+ }
+ 
++// Serial-only setup lines: the SDK token, and the Gemini key for spoken replies.
++static bool console_hook(const char *line) {
++#if CONFIG_MUSE_HATCH
++    if (muse_gemini_tts_console_command(line)) return true;
++#endif
++    return sdk_token_console_command(line);
++}
++
+ void muse_glue_start(void) {
+     // First, before Link's Wi-Fi, BLE and tunnel and Muse's display take and
+     // fragment internal RAM: the CPU's light-sleep retention memory.
+     muse_input_power_init();
+     s_ready = xEventGroupCreate();
+     muse_link_register(&s_ops);
+-    muse_input_set_console_hook(sdk_token_console_command);
++    muse_input_set_console_hook(console_hook);
+     muse_ble_set_name(identity_ble_name());
+     ble_companion_t companion = {
+         .svcs = muse_ble_services(),
