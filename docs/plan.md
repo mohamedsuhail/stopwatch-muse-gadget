@@ -2,6 +2,40 @@
 
 *Prepared with Claude on Oct 16, 2026. Verified against a local clone of `facebookincubator/muse-gadget-sdk` (commit `fa073045`, Oct 15, 2026) at `~/workspace/gadgets/muse-gadget-sdk`.*
 
+## Status (Oct 21, 2026)
+
+The StopWatch arrived, was flashed and is paired. It's running this repo's firmware: the pinned
+SDK plus `patches/0001-stopwatch-customizations.patch` and `avatar/muse_pixel.c`. See the README's
+Customizations section for what those change.
+
+Done:
+
+- [x] ESP-IDF v6.0.1 installed (`scripts/install-idf.sh`).
+- [x] Factory flash backed up and checked against the chip (`backups/stopwatch-factory-20261021-152942.bin`).
+- [x] Firmware built and flashed. USB serial worked from the start, so the A5 workaround wasn't needed.
+- [x] SDK token set over serial. Paired in the Muse app.
+- [x] **Spoken replies.** The pinned SDK only shows replies as text. The speaker was fine (the
+      settings beep played), but the log showed the "reply audio" was the silence that paces the
+      captions. Added Gemini TTS (`gemini-3.8-flash-lite-tts`, voice Achernar), keyed over serial
+      with `>gemini_key=`.
+- [x] Fixed TLS to Google. It needed `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY`
+      (GTS Root R4 is cross-signed by GlobalSign).
+- [x] Custom avatar: the toy astronaut, at 448 px (7×), centred on the round screen.
+- [x] Battery work:
+  - Auto-sleep is 30 s.
+  - The Wi-Fi nap starts after 30 s.
+  - New Auto power-off setting (default 30 min asleep on battery).
+  - CPU power-down in light sleep is left off: it needs 8.5 KB of internal RAM the board can't spare.
+- [x] While asleep, only the red button wakes the watch (`.power_wakes_only`).
+- [x] Blue (talk) and yellow (speaker on/off) work as mapped on the device. Red power-off and wake are still to test (below).
+
+Decided against:
+
+- **Mic only while talking.** The mic runs while the screen is on, into a 320 ms in-memory ring
+  buffer, so the first word isn't clipped. Nothing leaves the watch until the talk button is held.
+  Turning the mic off between presses saves little battery, since the screen dominates, so we kept
+  the SDK's behaviour.
+
 ## Support status: confirmed ✅
 
 Claude initially thought the StopWatch wasn't officially supported (it saw a stale README). The local clone proves it is:
@@ -77,9 +111,15 @@ The SDK lets boards expose commands Muse can call (other boards expose `sensors.
 2. **Voice-set timer that survives offline.** "Muse, set a 12-minute pasta timer" → new `timer.set` command. The RX8130CE RTC counts down locally even if Wi-Fi drops; sweeping arc on the round display; vibration + speaker chime at zero. Variants: Pomodoro, 2-minute routines. `timer.list` / cancel / extend.
 3. **Tilt-dial navigator.** Gyroscope as a virtual watch crown: rotate to scroll through images/cards Muse pushes, tap to select. New `imu.read` command (orientation, shake-to-dismiss). Stretch: expose a Grove sensor on the HY2.0-4P port via a `sensors.read`-style command, mirroring the SenseCAP Indicator pattern.
 
-## Still to verify in the clone
+## Still to verify
 
-- [ ] Where the SDK token gets injected (Kconfig / menuconfig / provisioning step / pairing flow) — grep for it.
+- [x] Where the SDK token gets injected: over serial (`>sdk_token=`, `main/sdk_token_console.c`)
+      or with Kconfig `CONFIG_GADGET_SDK_TOKEN`. See `docs/token.md`.
 - [ ] Which NVS encryption scheme `CONFIG_HOMEHUB_NVS_ENCRYPTION` uses and whether it burns eFuses.
+      This matters more now, because NVS holds the Gemini key as well as the SDK token.
+- [ ] Measure battery life with the new sleep settings (screen-off hours on a full charge), and
+      check that Auto power-off fires on battery.
+- [ ] Check the wake rules on battery: taps and the blue and yellow buttons do nothing while asleep,
+      and red wakes the watch.
 - [x] StopWatch board support exists — confirmed.
 - [x] Build is by-hand (idf.py + overlays); flash via `tools/muse/board.sh flash stopwatch`.

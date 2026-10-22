@@ -1,4 +1,15 @@
-# Muse Gadget SDK token
+# SDK token and Gemini API key
+
+This firmware uses two secrets. Neither belongs in git.
+
+| Secret | What it's for | Needed to build? | How it gets onto the watch |
+| --- | --- | --- | --- |
+| Muse Gadget SDK token | Pairing and working with the Muse app | No | `>sdk_token=...` over serial, or menuconfig |
+| Gemini API key | Spoken replies (Gemini TTS) | No | `>gemini_key=...` over serial only |
+
+Most of this page covers the SDK token. The Gemini key has
+[its own section](#gemini-api-key-spoken-replies) below. The never-commit checklist and the leak
+steps apply to both.
 
 The firmware needs a Muse Gadget SDK token to work with the Muse app.
 
@@ -107,6 +118,57 @@ A token stored over serial always wins over the one in the firmware. Consequence
   predates any token, but any later `read-flash` dump will include it. Treat those dumps like the
   token itself.
 
+## Gemini API key (spoken replies)
+
+The firmware in this repo speaks Muse's replies through Gemini TTS
+(`patches/0001-stopwatch-customizations.patch`, `muse_gemini_tts.c`). Without a key, replies stay
+text captions.
+
+### Getting a key
+
+Create one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey), signed into your
+own Google account. Put the project on a spending limit, and use a key you can revoke. It sits on
+the watch unencrypted, since NVS encryption is deferred, so anyone holding the watch could read it.
+
+### Setting it
+
+There's no menuconfig path: the key is only ever set over serial and stored in the watch's NVS
+(namespace `muse_tts`, key `gemini_key`). It never enters the build tree or a firmware image, and
+it survives reflashing.
+
+1. Open a serial monitor, as in Path A above, or run
+   `python -m serial.tools.miniterm --eol LF PORT 115200`.
+2. Type this line and press Enter:
+
+   ```
+   >gemini_key=YOUR_KEY
+   ```
+
+3. The watch answers `@gemini_key ok`. No restart is needed. The next reply is spoken.
+
+Other answers:
+
+- **`@gemini_key error invalid`:** the key is shorter than 20 characters, or has characters other
+  than letters, digits, `-`, `_` and `.`.
+- **`@gemini_key error storage`:** NVS couldn't save it. Try again, and check the serial log.
+
+To remove it, send `>gemini_key=` with nothing after it. The watch answers `@gemini_key cleared`,
+and replies go back to captions.
+
+The firmware never logs the key. Its log only says `Gemini key stored` or `Gemini key cleared`.
+
+### Keeping a copy on your Mac
+
+To test the API from the Mac, or to resend the key after erasing the flash, keep a copy outside the
+repo. This prompt doesn't echo what you type, and nothing lands in shell history:
+
+```bash
+mkdir -p ~/.config/stopwatch && read -rs "?Gemini API key: " k && printf %s "$k" > ~/.config/stopwatch/gemini_key && chmod 600 ~/.config/stopwatch/gemini_key && unset k
+```
+
+Scripts read it with `$(cat ~/.config/stopwatch/gemini_key)`. Don't `echo` it or paste it into
+chats, issues or logs.
+
 ## Never-commit checklist
 
 Before every commit:
@@ -125,11 +187,25 @@ read -rs FRAG && git grep -n -F -- "$FRAG"; unset FRAG
 
 No output means the fragment isn't in any tracked file.
 
-## If the token leaks
+For the Gemini key, check the staged changes and the history against the saved copy, plus the
+shape of any Google key:
 
-If the token ever reaches git (even an unpushed local commit), a public place, or a shared log:
+```bash
+git diff --cached | grep -cF -- "$(cat ~/.config/stopwatch/gemini_key)"    # must print 0
+git log -p --all | grep -cF -- "$(cat ~/.config/stopwatch/gemini_key)"    # must print 0
+git grep -nE 'AIza[0-9A-Za-z_-]{30,}|mgst_[0-9A-Za-z]{8,}'               # must print nothing
+```
 
-1. Treat it as compromised. Revoke or regenerate it wherever you obtained it.
+When you regenerate the patch, check it too. It's generated from the SDK checkout, so anything
+pasted into an SDK file would end up in it.
+
+## If the token or key leaks
+
+If the token or the Gemini key ever reaches git (even an unpushed local commit), a public place, or
+a shared log:
+
+1. Treat it as compromised. Revoke or regenerate it wherever you obtained it: gadgets.muse.ai for
+   the token, or AI Studio / Google Cloud console for the Gemini key.
 2. Remove it from history. Deleting it in a new commit is not enough, since the old commit still
    contains it. Rewrite history (for example with `git filter-repo`) and force-push.
-3. Set the new token on the device over serial (Path A).
+3. Set the new token on the device over serial (Path A), or the new key with `>gemini_key=...`.
