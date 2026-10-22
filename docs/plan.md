@@ -36,7 +36,8 @@ Done:
       without multiplies. Measured on the watch: ticks 42 ms apart (43 ms at most), scaling 10 ms.
 - [x] Listening and sending show three round dots that build up, and a sent note a tick, in place of
       "Listening 2.3s" and "Note sent - waiting for Muse". The ring is white. Pairing shows an arrow
-      at the blue button with "Press to pair".
+      at the blue button with "Press to pair". The dots and tick sit on a scrim. Replies get most of the screen
+      (21 x 8 pages, the character small at the top once text arrives).
 - [x] **Pairing lost after flashes** (5 times on Oct 22). Every boot refreshed the token to report
       the SDK token, each refresh rotates the refresh token, and a reset (a flash, a serial monitor
       opening the port) between the server rotating it and NVS saving the new one left a stale token,

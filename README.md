@@ -329,7 +329,8 @@ Nothing leaves the watch until you hold the blue button.
 
 **Dots and ticks instead of status lines.** With `.listen_dots = true`, the voice task's status
 lines become marks in the caption's place (`MUSE_CAPTION_DOTS` and `MUSE_CAPTION_SENT` in
-`muse_state.h`, drawn in `muse_ui.c`). They are drawn as shapes, not set in a font:
+`muse_state.h`, drawn in `muse_ui.c`), on the same dark scrim as the captions. They are drawn as
+shapes, not set in a font:
 
 - **Listening and sending:** three round white dots that build up, one, two, three, 0.4 s each. The
   level meter and the live transcript are hidden.
@@ -337,6 +338,12 @@ lines become marks in the caption's place (`MUSE_CAPTION_DOTS` and `MUSE_CAPTION
 - **Muse's reply, errors and short messages** ("Speaker on") stay as words.
 
 The level meter, shown on boards without `.listen_dots`, is 14 round dots in the state's colour.
+
+**Replies get the screen.** With `.big_reply = true`, the character stays full size through the
+dots and tick, and once Muse's reply text arrives it shrinks to the top centre and the text takes
+the rest of the circle: pages of 21 × 8 (up from 13 × 3 while speaking), whether the reply is heard
+or only read. Pages are cut by letter count, so the columns are counted in average letters (an
+"o" plus 2 px) rather than M's, which lets lines run the width of the screen.
 
 **Pairing prompt.** With `.pair_arrow = true`, when the Muse app asks for the talk button, a white
 arrow points at the blue button from just inside the rim, with "Press to pair" under it
