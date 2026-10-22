@@ -18,7 +18,7 @@ On top of the stock SDK, this repo adds:
   (`avatar/character/`), drawn at 384 px. The older pixel-art astronaut is still there
   (`avatar/muse_pixel.c`, `AVATAR=pixel`).
 - **A cleaner screen.** Black and white throughout: white Montserrat text on soft dark bands, and
-  Wi-Fi inside a battery ring at 3 o'clock. There's no state word, since the clips show the state.
+  Wi-Fi inside a battery ring at 6 o'clock. There's no state word, since the clips show the state.
   The rim icons and the top status line are gone, and a worn white painter's-tape "MOBOT" label sits
   across the top-left.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
