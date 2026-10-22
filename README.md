@@ -350,6 +350,9 @@ or only read. Pages are cut by letter count, so the columns are counted in avera
 arrow points at the blue button from just inside the rim, with "Press to pair" under it
 (`avatar/pair-arrow-mockup.png`). The six-digit passkey still shows on its card.
 
+**No page dots.** `.hide_page_dots = true` drops the two dots at the bottom that mark the main
+screen and settings; settings are a swipe left.
+
 **Hidden rim icons.** `.hide_rim_hints = true` hides the mic, speaker and power icons beside the
 buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
 
