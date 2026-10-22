@@ -78,11 +78,17 @@ apply_patches() {
             die "patch $(basename "$p") doesn't apply to $SDK_DIR. Discard local SDK changes (git -C $SDK_DIR checkout . && git -C $SDK_DIR clean -fd) and re-run."
         fi
     done
-    # Our avatar (the SDK keeps custom avatars in a gitignored directory).
-    if [ -f "$REPO_ROOT/avatar/muse_pixel.c" ]; then
+    # Our avatar (the SDK keeps custom avatars in a gitignored directory): the
+    # character's video clips by default (avatar/character, written to the
+    # "anims" partition by flash.sh), or AVATAR=pixel for the pixel astronaut.
+    local avatar="$REPO_ROOT/avatar/character/muse_pixel.c"
+    if [ "${AVATAR:-clips}" = "pixel" ] || [ ! -f "$avatar" ]; then
+        avatar="$REPO_ROOT/avatar/muse_pixel.c"
+    fi
+    if [ -f "$avatar" ]; then
         mkdir -p "$SDK_DIR/esp32/components/muse/avatar"
-        cp "$REPO_ROOT/avatar/muse_pixel.c" "$SDK_DIR/esp32/components/muse/avatar/muse_pixel.c"
-        log "using avatar/muse_pixel.c"
+        cp "$avatar" "$SDK_DIR/esp32/components/muse/avatar/muse_pixel.c"
+        log "using ${avatar#$REPO_ROOT/}"
     fi
     # The MOBOT tape label (avatar/make_tape.py makes it).
     if [ -f "$REPO_ROOT/avatar/tape.rgb565a8" ]; then

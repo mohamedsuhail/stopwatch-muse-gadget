@@ -14,10 +14,13 @@ On top of the stock SDK, this repo adds:
 - **Spoken replies.** At the pinned commit the SDK shows Muse's replies as text only, with no
   speech. This repo sends each reply to Google's Gemini TTS (`gemini-3.8-flash-lite-tts`, voice
   **Leda**) and plays the audio on the watch's speaker. This needs a Gemini API key (step 5).
-- **A custom avatar.** A toy astronaut (`avatar/muse_pixel.c`), drawn at 384 px.
-- **A cleaner screen.** Montserrat text on soft dark bands, a bold state word in sentence case, and
-  Wi-Fi inside a battery ring at 3 o'clock. The rim icons and the top status line are gone, and a
-  worn white painter's-tape "MOBOT" label sits across the top-left.
+- **A custom avatar.** A toy astronaut played as video clips, one per state
+  (`avatar/character/`), drawn at 384 px. The older pixel-art astronaut is still there
+  (`avatar/muse_pixel.c`, `AVATAR=pixel`).
+- **A cleaner screen.** Black and white throughout: white Montserrat text on soft dark bands, and
+  Wi-Fi inside a battery ring at 3 o'clock. There's no state word, since the clips show the state.
+  The rim icons and the top status line are gone, and a worn white painter's-tape "MOBOT" label sits
+  across the top-left.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
   asleep on battery for a while.
 - **Button-only wake.** While asleep, red wakes the watch, and holding blue wakes it and listens.
@@ -56,8 +59,9 @@ This does four things:
 
 1. Clones the SDK at the pinned commit into `.sdk/muse-gadget-sdk` (override with `SDK_DIR`).
 2. Applies every `patches/*.patch` to it. A patch that's already applied is skipped.
-3. Copies `avatar/muse_pixel.c` into the SDK's custom-avatar slot, and `avatar/tape.rgb565a8` into
-   `components/muse/tape/`.
+3. Copies the avatar into the SDK's custom-avatar slot: `avatar/character/muse_pixel.c` (the clip
+   player), or `avatar/muse_pixel.c` (the pixel astronaut) with `AVATAR=pixel ./scripts/build.sh`.
+   It also copies `avatar/tape.rgb565a8` into `components/muse/tape/`.
 4. Runs `tools/muse/board.sh build stopwatch` from the SDK's `esp32/` directory.
 
 `board.sh build stopwatch` sets the IDF target to `esp32s3` and
@@ -82,7 +86,9 @@ commands that discard them.
 `backups/stopwatch-factory-<date>.bin` (`esptool --chip esp32s3 -p PORT read-flash 0 0x1000000 ...`)
 and writes a `.sha256` checksum next to it before flashing. Later runs detect the existing backup and
 skip straight to flashing, so you keep one golden copy of the factory image. Then it flashes with
-`tools/muse/board.sh flash stopwatch [PORT]`.
+`tools/muse/board.sh flash stopwatch [PORT]`, and writes the avatar clips
+(`avatar/character/anims.pack`, about 2.4 MB) to the `anims` partition at `0x830000`. It skips the
+clips when the chip already has them (`esptool verify-flash`).
 
 The `.sha256` file only proves the file hasn't changed since it was written. To prove the backup
 matches the chip, compare it against the device before the first flash:
@@ -166,7 +172,7 @@ click red once.
 ## Customizations
 
 All SDK changes are in `patches/0001-stopwatch-customizations.patch`. The avatar is in
-`avatar/muse_pixel.c`.
+`avatar/character/` (the clips), with the pixel astronaut in `avatar/muse_pixel.c`.
 
 ### Spoken replies (Gemini TTS)
 
@@ -233,14 +239,28 @@ happens on Muse's server.
 
 ### Avatar
 
-`avatar/muse_pixel.c` replaces the SDK's default character with a toy astronaut:
+The avatar is a toy astronaut (`avatar/character/astronaut.jpg`) played as video clips, one per
+state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind the same
+`muse_pixel.h` API, so the UI around it is unchanged.
 
-- **Look:** white helmet, orange visor rim, cyan antennae and orange suit.
-- **States:** it animates boot, idle, listening, thinking, speaking, happy, error and power-off.
-- **Previews:** `avatar/preview.png` shows one frame of every state. `avatar/size-options.png` shows
-  the screen-size options that were compared.
+- **Clips:** `avatar/character/clips/` holds wake, idle, listening, thinking, speaking, happy, error
+  and goodbye `.mp4`s (16:9, the character centred on black). Wake and goodbye play once and hold
+  their last frame. The others loop.
+- **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow) crops each clip to
+  its centre square at 192 px and 12 fps, makes the near-black background true black, and trims
+  each loop to its best-matching start and end frames. It writes `avatar/character/anims.pack`
+  (baseline JPEGs plus an index; the format is in the script's docstring).
+- **On the watch:** the pack lives in its own `anims` flash partition
+  (`esp32/partitions_stopwatch.csv`: the SDK's table plus `anims` at `0x830000`, 7 MB, in the 16 MB
+  flash's otherwise unused upper half). The player maps it, decodes a frame with the ROM's JPEG
+  decoder when the frame changes, and scales it to the canvas with bilinear filtering. Without the
+  partition, or before `flash.sh` has written it, the avatar stays black and the log says why.
+- **Preview:** `avatar/character/preview.gif` shows every clip.
 
-To preview changes without the watch:
+**The pixel astronaut.** `avatar/muse_pixel.c` draws the same character as 64 px pixel art (white
+helmet, orange visor rim, cyan antennae, orange suit). Build it with `AVATAR=pixel
+./scripts/build.sh`. `avatar/preview.png` shows one frame of every state, and
+`avatar/size-options.png` the screen sizes compared. To preview changes without the watch:
 
 ```bash
 cd .sdk/muse-gadget-sdk/esp32
@@ -298,17 +318,21 @@ buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
 
 - **Font:** replies and captions use Montserrat 20 (`caption_font()`). For characters Montserrat
   lacks, it falls back to the pixel font.
-- **State word:** "Listening", "Thinking" and so on are in Montserrat Bold 20
+- **State word:** hidden (`.hide_state_label = true`), since the clips show what the watch is doing.
+  Without it, "Listening", "Thinking" and so on are in white Montserrat Bold 20
   (`components/muse/fonts/muse_font_bold_20.c`, made with `lv_font_conv`, SIL OFL).
 - **Sentence case:** all-caps states and status lines are shown in sentence case ("SPEAKER ON"
   becomes "Speaker on"; `sentence_case()`). Muse, Wi-Fi and USB keep their capitals. Muse's replies
   are left as written.
-- **Scrim:** a soft dark band (black, about 65% opaque, rounded) sits behind the state word,
-  captions and replies, so they read clearly over the avatar.
+- **Scrim:** a soft dark band (black, 70% opaque, rounded) sits behind the state word, captions
+  and replies, so white text reads clearly over the white helmet.
+- **Colours:** black and white. Captions, page dots and the settings pages' switches, sliders and
+  buttons are white or grey rather than violet. The ring and level bars keep each state's accent.
 
 **Tape label.** `.tape_label = true` draws "MOBOT" on worn white painter's tape across the
 top-left: grime, smudges, rubbed marker, and "A7·22·10·K" (22 Oct) in blue ballpoint. It's one
-image drawn over everything, like tape on the glass.
+image drawn over everything, like tape on the glass. The tape and the battery ring are hidden on
+the settings pages.
 
 - **Files:** `avatar/make_tape.py` (with `avatar/tape_art.py`) generates `avatar/tape.rgb565a8`,
   which `build.sh` copies into the SDK and the firmware embeds. `avatar/tape.png` is a preview.
@@ -331,17 +355,25 @@ stopwatch-muse-gadget/
 ├── scripts/
 │   ├── install-idf.sh    # ESP-IDF v6.0.1 install (idempotent)
 │   ├── build.sh          # clone pinned SDK, apply patches + avatar, build stopwatch firmware
-│   └── flash.sh          # factory backup + flash
+│   └── flash.sh          # factory backup + flash + avatar clips
 ├── patches/
 │   └── 0001-stopwatch-customizations.patch   # speech, screen, battery, wake
 ├── avatar/
-│   ├── muse_pixel.c      # the astronaut avatar renderer
+│   ├── character/        # the default avatar: the astronaut as video clips
+│   │   ├── muse_pixel.c  # the clip player (stands in for the pixel renderer)
+│   │   ├── make_anims.py # packs clips/*.mp4 into anims.pack
+│   │   ├── anims.pack    # what flash.sh writes to the "anims" partition
+│   │   ├── clips/        # one .mp4 per state
+│   │   ├── astronaut.jpg # the character's reference image
+│   │   └── preview.gif   # every clip
+│   ├── muse_pixel.c      # the pixel-art astronaut (AVATAR=pixel)
 │   ├── preview.png       # every state, enlarged
 │   ├── battery-preview.png  # the battery ring at 85%, 25%, 8% and charging
 │   ├── size-options.png  # on-screen size options compared
 │   ├── make_tape.py      # generates the MOBOT tape label (with tape_art.py)
 │   ├── tape.rgb565a8     # the tape label the firmware embeds
 │   ├── tape.png          # ...and a preview of it
+│   ├── status-mockup.png # the battery ring's states, mocked up
 │   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
@@ -357,7 +389,8 @@ Edit the files in `.sdk/muse-gadget-sdk/`, build and test, then regenerate the p
 files first, or the diff leaves them out:
 
 ```bash
-git -C .sdk/muse-gadget-sdk add -N esp32/components/muse/muse_gemini_tts.c esp32/components/muse/muse_gemini_tts.h
+git -C .sdk/muse-gadget-sdk add -N esp32/components/muse/muse_gemini_tts.c esp32/components/muse/muse_gemini_tts.h \
+    esp32/components/muse/fonts/muse_font_bold_20.c esp32/partitions_stopwatch.csv
 git -C .sdk/muse-gadget-sdk diff > patches/0001-stopwatch-customizations.patch
 git -C .sdk/muse-gadget-sdk reset -q
 ```

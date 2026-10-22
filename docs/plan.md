@@ -5,7 +5,7 @@
 ## Status (Oct 21, 2026)
 
 The StopWatch arrived, was flashed and is paired. It's running this repo's firmware: the pinned
-SDK plus `patches/0001-stopwatch-customizations.patch` and `avatar/muse_pixel.c`. See the README's
+SDK plus `patches/0001-stopwatch-customizations.patch` and the avatar in `avatar/character/`. See the README's
 Customizations section for what those change.
 
 Done:
@@ -31,6 +31,10 @@ Done:
 - [x] Custom avatar: the toy astronaut, now at 384 px (6×).
 - [x] Screen: Montserrat text on dark bands, bold sentence-case state word, Wi-Fi inside the battery
       ring at 3 o'clock, rim icons and top status line hidden, MOBOT painter's-tape label.
+- [x] Avatar as video clips (Oct 22): one clip per state, packed into a new `anims` flash
+      partition and played by `avatar/character/muse_pixel.c`. The screen went black and white, and
+      the state word is hidden since the clips show the state. Builds; **still to check
+      on the watch** (the new partition table, the clips' frame rate and the decode time in the log).
 - [x] Battery work:
   - Auto-sleep is 30 s.
   - The Wi-Fi nap starts after 30 s.

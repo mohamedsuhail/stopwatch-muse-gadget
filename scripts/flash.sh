@@ -196,6 +196,19 @@ else
     bash tools/muse/board.sh flash "$BOARD" "$PORT"
 fi
 
+# The character's clips go in their own partition (partitions_stopwatch.csv,
+# "anims" at 0x830000). Written only when what's there differs.
+ANIMS="$REPO_ROOT/avatar/character/anims.pack"
+ANIMS_OFFSET=0x830000
+if [ -f "$ANIMS" ]; then
+    if "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" verify-flash "$ANIMS_OFFSET" "$ANIMS" >/dev/null 2>&1; then
+        log "animations already up to date"
+    else
+        log "writing animations ($(( $(wc -c < "$ANIMS") / 1024 )) KB) to $ANIMS_OFFSET"
+        "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b 460800 write-flash "$ANIMS_OFFSET" "$ANIMS"
+    fi
+fi
+
 log "flash succeeded"
 echo "If this was the first flash, the factory backup is in $BACKUP_DIR."
 echo "Next: add the SDK token (docs/token.md), then pair from the Muse app."
