@@ -37,6 +37,31 @@ index ddf486b..a3e8a6b 100644
  
      /* Power rails, buses, expanders. Runs first. */
      esp_err_t (*init)(void);
+diff --git a/esp32/components/muse/muse_chat_priv.h b/esp32/components/muse/muse_chat_priv.h
+index 855b101..208fd32 100644
+--- a/esp32/components/muse/muse_chat_priv.h
++++ b/esp32/components/muse/muse_chat_priv.h
+@@ -69,9 +69,19 @@ static inline void muse_chat_reject(muse_chat_rejected_t *rejected, const char *
+     memcpy(rejected->ids[rejected->count++], id, len + 1);
+ }
+ 
++/*
++ * The instruction that goes with every voice note (its "message"): replies are
++ * spoken on a small speaker, so short and plain, without lists or formatting
++ * that sound wrong read aloud, and they finish sooner. No quotes or
++ * backslashes: it's pasted into the JSON as it is.
++ */
++#define MUSE_VOICE_NOTE_STYLE \
++    "This voice note is from my StopWatch, which reads your reply aloud on a small speaker. " \
++    "Answer in one to three short spoken sentences. No lists, headings, emoji or markdown."
++
+ /* A voice note is a POST /chat/stream body: NOTE_HEAD, a base64 WAV, NOTE_TAIL. */
+ #define MUSE_HATCH_NOTE_HEAD \
+-    "{\"message\":\"\",\"output_modality\":\"text\",\"items\":[{\"type\":\"file\"," \
++    "{\"message\":\"" MUSE_VOICE_NOTE_STYLE "\",\"output_modality\":\"text\",\"items\":[{\"type\":\"file\"," \
+     "\"mime_type\":\"audio/wav\",\"filename\":\"voice_note.wav\",\"data_base64\":\""
+ #define MUSE_HATCH_NOTE_TAIL "\"}]}"
+ #define MUSE_HATCH_WAV_HEADER 44
 diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
 index 2866f5d..6d044d1 100644
 --- a/esp32/components/muse/muse_chat_session.cpp
@@ -302,10 +327,10 @@ index 2866f5d..6d044d1 100644
      s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
 diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
 new file mode 100644
-index 0000000..738f51d
+index 0000000..8fe408f
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.c
-@@ -0,0 +1,805 @@
+@@ -0,0 +1,812 @@
 +#include "muse_gemini_tts.h"
 +
 +#include <stdatomic.h>
@@ -325,6 +350,7 @@ index 0000000..738f51d
 +#include "freertos/task.h"
 +#include "lwip/sockets.h"
 +#include "mbedtls/base64.h"
++#include "muse_wifi.h"
 +#include "nvs.h"
 +
 +static const char *TAG = "muse_gemini_tts";
@@ -347,6 +373,7 @@ index 0000000..738f51d
 +#define STALE_US (45 * 1000000LL)        /* idle longer than this: reconnect rather than trust it */
 +#define QUEUE_LEN 24
 +#define STACK (10 * 1024)
++#define WARM_WIFI_WAIT_MS 10000         /* waking from a nap, Wi-Fi takes a few seconds to rejoin */
 +
 +/* --- shared state (any task) -------------------------------------------------- */
 +
@@ -1018,8 +1045,13 @@ index 0000000..738f51d
 +        switch (job.type) {
 +        case JOB_WARM:
 +            if (!conn_fresh()) {
-+                r.gen = atomic_load(&s_gen);
-+                conn_open();
++                for (int waited = 0; !muse_wifi_connected() && waited < WARM_WIFI_WAIT_MS; waited += 100) {
++                    vTaskDelay(pdMS_TO_TICKS(100));
++                }
++                if (muse_wifi_connected() && !conn_fresh()) {
++                    r.gen = atomic_load(&s_gen);
++                    conn_open();
++                }
 +            }
 +            break;
 +        case JOB_SAY:
@@ -1181,10 +1213,20 @@ index 0000000..4e10649
 +}
 +#endif
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 5a60abf..ea9a52b 100644
+index 5a60abf..e4ced73 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
-@@ -64,7 +64,7 @@ static const char *TAG = "muse_input";
+@@ -45,6 +45,9 @@
+ #include "muse_ui.h"
+ #include "muse_voice.h"
+ #include "muse_wifi.h"
++#if CONFIG_MUSE_HATCH
++#include "muse_gemini_tts.h"
++#endif
+ #if CONFIG_MUSE_WATCHER_CAMERA
+ #include "boards/watcher_camera.h"
+ #endif
+@@ -64,7 +67,7 @@ static const char *TAG = "muse_input";
  #define NAP_WAIT_MS 10000      /* ... and Wi-Fi napping */
  #define POWER_MS 2000          /* refresh battery */
  #define REST_POWER_MS 10000    /* ... while paused */
@@ -1193,7 +1235,19 @@ index 5a60abf..ea9a52b 100644
  #define DOUBLE_TICKS 35        /* 350 ms: a second aux press within this toggles phone setup */
  
  #define GOODBYE_MS 1500        /* let the goodbye animation play */
-@@ -267,6 +267,8 @@ static void talk_button(unsigned ev)
+@@ -135,6 +138,11 @@ static void set_asleep(bool asleep, const char *why)
+         if (!asleep && !muse_wifi_connected()) {
+             muse_wifi_apply();   /* the screen says reconnecting: don't sit out the backoff */
+         }
++#if CONFIG_MUSE_HATCH
++        if (!asleep && muse_settings_speaker_on()) {
++            muse_gemini_tts_warm();   /* connect to Gemini now, not when the talk button goes */
++        }
++#endif
+     }
+ }
+ 
+@@ -267,6 +275,8 @@ static void talk_button(unsigned ev)
              /* Confirmed a Muse app pairing (Link's setup button). */
              muse_state_poke();
              swallow = true;
@@ -1202,7 +1256,7 @@ index 5a60abf..ea9a52b 100644
          } else if (muse_state_asleep()) {
              set_asleep(false, muse_board->talk_button);
              post(MUSE_PTT_DOWN, true);
-@@ -470,6 +472,29 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+@@ -470,6 +480,29 @@ static bool update_wifi_nap(TickType_t now, bool paused)
      return napping;
  }
  
@@ -1232,7 +1286,7 @@ index 5a60abf..ea9a52b 100644
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
   * click. LONG is supplied by the board only after a validated hold. */
  static bool s_power_down, s_power_swallow;
-@@ -504,7 +529,9 @@ static void dedicated_buttons(unsigned ev)
+@@ -504,7 +537,9 @@ static void dedicated_buttons(unsigned ev)
      if (release) power_release();
      if (ev & MUSE_BTN_SPEAKER_PRESS) {
          muse_state_poke();
@@ -1243,7 +1297,7 @@ index 5a60abf..ea9a52b 100644
              set_asleep(false, muse_board->speaker_button);   /* wake-only press */
          } else if (muse_state_mode(NULL) != MUSE_MODE_OFF) {
              bool on = !muse_settings_speaker_on();
-@@ -579,6 +606,7 @@ static void input_task(void *arg)
+@@ -579,6 +614,7 @@ static void input_task(void *arg)
  
          paused = update_power();
          bool napping = update_wifi_nap(now, paused);
@@ -1451,3 +1505,27 @@ index 29d4d8b..87a70d3 100644
      muse_ble_set_name(identity_ble_name());
      ble_companion_t companion = {
          .svcs = muse_ble_services(),
+diff --git a/esp32/tests/test_muse_voice_note.py b/esp32/tests/test_muse_voice_note.py
+index 8403bec..1150299 100644
+--- a/esp32/tests/test_muse_voice_note.py
++++ b/esp32/tests/test_muse_voice_note.py
+@@ -48,7 +48,9 @@ def riff_header(rate):
+ 
+ # The POST /chat/stream envelope around the base64 WAV, written out rather than
+ # read from muse_chat_priv.h: changing what the device sends must change this.
+-HEAD = (b'{"message":"","output_modality":"text","items":[{"type":"file",'
++STYLE = (b'This voice note is from my StopWatch, which reads your reply aloud on a small speaker. '
++         b'Answer in one to three short spoken sentences. No lists, headings, emoji or markdown.')
++HEAD = (b'{"message":"' + STYLE + b'","output_modality":"text","items":[{"type":"file",'
+         b'"mime_type":"audio/wav","filename":"voice_note.wav","data_base64":"')
+ TAIL = b'"}]}'
+ 
+@@ -198,7 +200,7 @@ class VoiceNoteHelpers(unittest.TestCase):
+         self.assertEqual(body, HEAD + base64.b64encode(riff_header(16000) + pcm) + TAIL)
+         request = json.loads(body)
+         wav = base64.b64decode(request['items'][0].pop('data_base64'), validate=True)
+-        self.assertEqual(request, {'message': '', 'output_modality': 'text', 'items': [
++        self.assertEqual(request, {'message': STYLE.decode(), 'output_modality': 'text', 'items': [
+             {'type': 'file', 'mime_type': 'audio/wav', 'filename': 'voice_note.wav'}]})
+         self.assertEqual(wav, riff_header(16000) + pcm)
+         with wave.open(io.BytesIO(wav)) as w:

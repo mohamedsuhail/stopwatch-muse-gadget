@@ -188,6 +188,16 @@ leaves speech to "a text-to-speech API of your choice". The patch adds:
     cross-signed by GlobalSign, and without this option the watch rejects the certificate.
   - `CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y`, for resumed TLS sessions.
 
+**Shorter, spoken-style replies.** Every voice note carries an instruction in its `message`
+field: answer in one to three short spoken sentences, with no lists, headings, emoji or markdown.
+It's `MUSE_VOICE_NOTE_STYLE` in `components/muse/muse_chat_priv.h`. The Muse app shows the
+instruction next to each voice message from the watch. Muse mostly follows it, but a question that
+asks for "three facts" still gets three.
+
+**Ready on wake.** Pressing red to wake the watch opens the Gemini connection straight away. If
+Wi-Fi is still rejoining after a nap, the watch waits up to 10 s for it. The handshake is then done
+before you press talk. A resumed session took 54 ms, against about 2 s for a full handshake.
+
 **Measured latency** (Oct 22, 2026, times after letting go of the talk button):
 
 | | Before | After |

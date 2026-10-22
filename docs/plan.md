@@ -25,6 +25,10 @@ Done:
   - Replies spoken sentence by sentence as the text streams in.
   - TLS session resumption for reconnects.
   - Text-to-first-sound went from 3.3–3.8 s to 1.0–1.5 s. Details in the README.
+- [x] Voice notes ask Muse for short spoken-style answers (`MUSE_VOICE_NOTE_STYLE`). The Gemini
+      connection opens on wake (red button); resumed sessions take ~50 ms.
+- [ ] Maybe: a short pre-recorded "let me think" sound if Muse's text takes over ~1.5 s. Most of
+      the remaining wait is Muse thinking.
 - [x] Custom avatar: the toy astronaut, at 448 px (7×), centred on the round screen.
 - [x] Battery work:
   - Auto-sleep is 30 s.
