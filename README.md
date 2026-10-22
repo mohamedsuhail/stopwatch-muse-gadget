@@ -458,6 +458,7 @@ stopwatch-muse-gadget/
 ├── docs/
 │   ├── plan.md           # project plan and status
 │   ├── internal-ram.md   # where the StopWatch's internal RAM goes, and the fixes that won it back
+│   ├── infra.md          # build, flash and test infrastructure to improve, ranked
 │   └── token.md          # SDK token, Gemini and xAI keys: how to set them, never-commit rules
 ├── backups/              # factory flash backup (gitignored)
 └── .sdk/                 # SDK checkout (gitignored; created by build.sh)
