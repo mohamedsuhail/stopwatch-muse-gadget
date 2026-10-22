@@ -35,7 +35,7 @@ The token is stored on the device. Nothing lands in the build tree.
 
 ```bash
    . "$HOME/esp/esp-idf-v6.0.1/export.sh"
-   cd .sdk/muse-gadget-sdk/esp32
+   cd ~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk/esp32
    idf.py -B build-muse-m5stack-stopwatch -p PORT monitor
 ```
 
@@ -69,7 +69,7 @@ The token is compiled into the firmware via Kconfig `CONFIG_GADGET_SDK_TOKEN`.
 
 ```bash
    . "$HOME/esp/esp-idf-v6.0.1/export.sh"
-   cd .sdk/muse-gadget-sdk/esp32
+   cd ~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk/esp32
    idf.py -B build-muse-m5stack-stopwatch menuconfig
 ```
 
@@ -83,8 +83,9 @@ The token is compiled into the firmware via Kconfig `CONFIG_GADGET_SDK_TOKEN`.
 ```
 
 **Where the token ends up with this path:** the generated `sdkconfig`, generated config headers
-and JSON in the build directory, and the firmware `.bin` files. This repo gitignores all of these
-(`.sdk/`, `build*/`, `sdkconfig*`, `*.bin`). Even so:
+and JSON in the build directory, and the firmware `.bin` files. They're in the SDK checkout outside the repo
+(`~/Library/Caches/stopwatch-muse-gadget/`), and the repo gitignores them anyway (`.sdk/`,
+`build*/`, `sdkconfig*`, `*.bin`). Even so:
 
 - Don't share build directories or firmware binaries.
 - Don't paste `sdkconfig` contents anywhere.
@@ -216,7 +217,9 @@ git grep -nE 'AIza[0-9A-Za-z_-]{30,}|mgst_[0-9A-Za-z]{8,}'               # must 
 ```
 
 When you regenerate the patch, check it too. It's generated from the SDK checkout, so anything
-pasted into an SDK file would end up in it.
+pasted into an SDK file would end up in it. `scripts/save-patch.sh` does this before it writes the
+patch: it refuses on the key shapes above (and `xai-...`) or on any key saved in
+`~/.config/stopwatch/`. It can't know the SDK token, so run the `FRAG` check on the patch too.
 
 ## If the token or key leaks
 

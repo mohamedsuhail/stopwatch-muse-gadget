@@ -2,31 +2,35 @@
 #
 # Build Muse Gadget firmware for the M5Stack StopWatch.
 #
-# - Clones the Muse Gadget SDK at the pinned commit into .sdk/muse-gadget-sdk
+# - Clones the Muse Gadget SDK at the pinned commit into
+#   ~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk, outside iCloud
 #   (override with SDK_DIR). If the checkout exists, fetches and checks out the
 #   pinned commit.
+# - Holds a lock on the checkout while it works, so a second build or a flash
+#   fails with the holder's name instead of breaking this one.
 # - Makes ESP-IDF v6.0.1's idf.py available (sources export.sh from known places).
 # - Runs `tools/muse/board.sh build stopwatch` from the SDK's esp32/ directory.
 # - Does NOT need the SDK token (the build warns about it; that's expected).
 #
 # Overrides:
-#   SDK_DIR     SDK checkout location (default: <repo>/.sdk/muse-gadget-sdk)
+#   SDK_DIR     SDK checkout location (default: ~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk)
+#   LOCK_WAIT   seconds to wait if another build or flash holds the checkout (default: 0)
 #   IDF_EXPORT  path to an ESP-IDF v6.0.1 export.sh, or the directory containing it
 
 set -euo pipefail
 
-SDK_REPO_URL="https://github.com/facebookincubator/muse-gadget-sdk.git"
-SDK_COMMIT="fa073045a5572a8e3367fae142c1b7a7c554f222"
 IDF_VERSION="v6.0.1"
 BOARD="stopwatch"
 BUILD_DIR_NAME="build-muse-m5stack-stopwatch"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SDK_DIR="${SDK_DIR:-$REPO_ROOT/.sdk/muse-gadget-sdk}"
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
 
 command -v git >/dev/null 2>&1 || die "git is required but not found."
 
@@ -172,6 +176,7 @@ run_board() {
 
 # --- Main -----------------------------------------------------------------------
 
+take_sdk_lock "scripts/build.sh"
 sync_sdk
 apply_patches
 ensure_idf

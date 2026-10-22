@@ -10,9 +10,11 @@
 #   backups/stopwatch-factory-<date>.bin (plus a .sha256 checksum) and verifies
 #   it, then flashes. Later runs find the existing backup and flash directly.
 # - Flashes with: tools/muse/board.sh flash stopwatch [PORT]
+# - Holds the same lock as build.sh, so it never flashes a half-built image.
 #
 # Overrides:
-#   SDK_DIR     SDK checkout location (default: <repo>/.sdk/muse-gadget-sdk)
+#   SDK_DIR     SDK checkout location (default: ~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk)
+#   LOCK_WAIT   seconds to wait if a build or another flash holds the checkout (default: 0)
 #   IDF_EXPORT  path to an ESP-IDF v6.0.1 export.sh, or the directory containing it
 #   BACKUP_DIR  where factory backups live (default: <repo>/backups)
 #   BACKUP_DATE stamp used in the backup filename (default: current date+time)
@@ -23,12 +25,14 @@ BOARD="stopwatch"
 IDF_VERSION="v6.0.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SDK_DIR="${SDK_DIR:-$REPO_ROOT/.sdk/muse-gadget-sdk}"
 BACKUP_DIR="${BACKUP_DIR:-$REPO_ROOT/backups}"
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
 
 command -v git >/dev/null 2>&1 || die "git is required but not found."
 
@@ -162,7 +166,9 @@ backup_factory() {
 
     mkdir -p "$BACKUP_DIR"
     log "backing up factory firmware (16 MB) to $backup_path"
-    "${ESPTOOL[@]}" --chip esp32s3 -p "$port" read-flash 0 0x1000000 "$backup_path"
+    # --after no-reset, like the clip writes below: the firmware flash resets
+    # the chip once at the end.
+    "${ESPTOOL[@]}" --chip esp32s3 -p "$port" --after no-reset read-flash 0 0x1000000 "$backup_path"
     sha256_file "$backup_path" >"$backup_path.sha256"
     log "verifying backup checksum"
     if command -v shasum >/dev/null 2>&1; then
@@ -183,6 +189,7 @@ log "using serial port: $PORT"
 ensure_idf
 ensure_esptool
 
+take_sdk_lock "scripts/flash.sh $PORT"
 [ -d "$SDK_DIR/.git" ] || die "SDK checkout not found at $SDK_DIR. Run scripts/build.sh first."
 [ -f "$SDK_DIR/esp32/tools/muse/board.sh" ] || die "expected $SDK_DIR/esp32/tools/muse/board.sh but it is missing."
 

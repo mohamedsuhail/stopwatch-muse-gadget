@@ -1,0 +1,5 @@
+# Python packages for the avatar tools (make_tape.py, tape_art.py,
+# character/make_anims.py, and the SDK's tools/muse/make_gifs.py):
+#   python3 -m venv ~/.venvs/stopwatch && ~/.venvs/stopwatch/bin/pip install -r avatar/requirements.txt
+# character/make_anims.py also needs ffmpeg on PATH (brew install ffmpeg).
+Pillow==11.3.0

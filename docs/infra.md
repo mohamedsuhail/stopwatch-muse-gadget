@@ -16,6 +16,10 @@ touch, such as `~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk`, and kee
 `.sdk/` only as an opt-in. The xAI session already builds in `~/Library/Caches/xai-build`. Delete
 the `dependencies N.lock` copies. Small.
 
+**Done.** `SDK_DIR` defaults to `~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk`
+(`scripts/lib/common.sh`); `SDK_DIR=$PWD/.sdk/muse-gadget-sdk` still works. The conflict copies are
+deleted.
+
 ## 2. One build at a time
 
 **What happened.** Two sessions started `board.sh build stopwatch` on the shared build folder nine
@@ -24,6 +28,11 @@ end of every build, so both failed.
 
 **Fix.** Take a lock in `scripts/build.sh` and `scripts/flash.sh` (`mkdir`-based, since macOS has
 no `flock`): print who holds it, and wait or fail. Small.
+
+**Done.** `take_sdk_lock` in `scripts/lib/common.sh`, used by `build.sh`, `flash.sh` and
+`save-patch.sh`: `muse-gadget-sdk.lock` next to the checkout, with the holder's script, process and
+start time. It fails at once by default, waits with `LOCK_WAIT=<seconds>`, and takes over a lock
+whose process is gone.
 
 ## 3. A script that saves the SDK patch
 
@@ -35,6 +44,10 @@ the README and by every session. A missed file silently drops from the patch.
 `esp32/partitions_stopwatch.csv` (skipping `tape/` and lock files), write the diff, reset, then
 check the patch applies to a clean checkout of the pinned commit, and scan it for keys
 (`docs/token.md`). Small.
+
+**Done.** `scripts/save-patch.sh`. It writes the patch only if it applies and has no keys, and
+says "unchanged" when the diff matches the committed patch. The README's "Changing the SDK patch"
+uses it.
 
 ## 4. A measurement script
 
@@ -66,6 +79,8 @@ copy the avatar, `board.sh build stopwatch`). It catches a patch that no longer 
 compiles before anyone flashes it. Medium.
 
 ## 7. Small fixes
+
+The first three are done; recording the flashed build is still open.
 
 - The scripts are committed without the executable bit (`100644`), so `./scripts/flash.sh` fails
   with "permission denied". `git update-index --chmod=+x scripts/*.sh`.

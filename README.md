@@ -26,16 +26,13 @@ On top of the stock SDK, this repo adds:
 - **Button-only wake.** While asleep, red wakes the watch, and holding blue wakes it and listens.
   Taps on the screen and a quick click of blue are ignored.
 
-The SDK itself stays untouched in `.sdk/`. `scripts/build.sh` applies `patches/*.patch` and copies
+The SDK itself is a pinned clone outside the repo, in
+`~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk`. `scripts/build.sh` applies `patches/*.patch` and copies
 in the avatar before every build. Details: [Customizations](#customizations).
 
 ## Quickstart
 
 Everything is scripted. Run these on the machine where the hardware will be attached (your Mac).
-
-```bash
-chmod +x scripts/*.sh   # once per fresh clone
-```
 
 ### 1. Install the toolchain
 
@@ -57,7 +54,9 @@ Idempotent. Installs ESP-IDF v6.0.1 into `~/esp/esp-idf-v6.0.1` (esp32s3 support
 
 This does four things:
 
-1. Clones the SDK at the pinned commit into `.sdk/muse-gadget-sdk` (override with `SDK_DIR`).
+1. Clones the SDK at the pinned commit into `~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk`
+   (override with `SDK_DIR`). It's outside `~/Documents` because iCloud syncs that folder, and
+   offloaded SDK files mid-build and left conflict copies of `dependencies.lock`.
 2. Applies every `patches/*.patch` to it. A patch that's already applied is skipped.
 3. Copies the avatar into the SDK's custom-avatar slot: `avatar/character/muse_pixel.c` (the clip
    player), or `avatar/muse_pixel.c` (the pixel astronaut) with `AVATAR=pixel ./scripts/build.sh`.
@@ -74,6 +73,12 @@ token, which is expected (see `docs/token.md`).
 
 If a patch fails to apply, the SDK checkout has local edits. `build.sh` stops and prints the
 commands that discard them.
+
+**One at a time.** `build.sh`, `flash.sh` and `save-patch.sh` hold a lock on the SDK checkout
+(`muse-gadget-sdk.lock` next to it) while they work, because two builds in one checkout break each
+other. A second one fails at once and says which script holds the lock, its process and when it
+started. `LOCK_WAIT=600` makes it wait up to 10 minutes instead. A lock left by a process that's
+gone is taken over.
 
 ### 3. Flash
 
@@ -271,7 +276,8 @@ state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind 
 - **Clips:** `avatar/character/clips/` holds wake, idle, listening, thinking, speaking, happy, error
   and goodbye `.mp4`s (16:9, the character centred on black). Wake and goodbye play once and hold
   their last frame. The others loop.
-- **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow) crops each clip to
+- **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow,
+  `avatar/requirements.txt`) crops each clip to
   its centre square at 256 px and 24 fps, makes the near-black background true black, sharpens it a
   little, and trims each loop to its best-matching start and end frames. It writes
   `avatar/character/anims.pack` (baseline JPEGs at quality 85 plus an index, 7.64 MB; the format is
@@ -306,8 +312,8 @@ helmet, orange visor rim, cyan antennae, orange suit). Build it with `AVATAR=pix
 `avatar/size-options.png` the screen sizes compared. To preview changes without the watch:
 
 ```bash
-cd .sdk/muse-gadget-sdk/esp32
-python3 tools/muse/make_gifs.py --src ../../../avatar/muse_pixel.c /tmp/avatar_gifs   # needs Pillow
+cd ~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk/esp32
+python3 tools/muse/make_gifs.py --src "$OLDPWD/avatar/muse_pixel.c" /tmp/avatar_gifs   # needs Pillow
 ```
 
 The board file sets `.avatar_px = 384` (6× the 64 px grid), which leaves room for the tape label
@@ -454,31 +460,39 @@ stopwatch-muse-gadget/
 │   ├── quality-options.png  # clip sizes and JPEG qualities compared
 │   ├── pair-arrow-mockup.png # the pairing prompt's arrow at the blue button
 │   ├── reply-layout-mockup.png # a reply page with the character small at the top
+│   ├── requirements.txt  # Python packages for the avatar tools (Pillow)
 │   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
 │   ├── internal-ram.md   # where the StopWatch's internal RAM goes, and the fixes that won it back
 │   ├── infra.md          # build, flash and test infrastructure to improve, ranked
 │   └── token.md          # SDK token, Gemini and xAI keys: how to set them, never-commit rules
-├── backups/              # factory flash backup (gitignored)
-└── .sdk/                 # SDK checkout (gitignored; created by build.sh)
-    └── muse-gadget-sdk/  # pinned at fa073045a5572a8e3367fae142c1b7a7c554f222, patched
+└── backups/              # factory flash backup (gitignored)
 ```
+
+The SDK checkout isn't in the repo: `build.sh` clones it into
+`~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk`, pinned at
+`fa073045a5572a8e3367fae142c1b7a7c554f222` and patched. `SDK_DIR=$PWD/.sdk/muse-gadget-sdk` still
+puts it in the repo (gitignored), but inside `~/Documents` iCloud gets in the way.
 
 ### Changing the SDK patch
 
-Edit the files in `.sdk/muse-gadget-sdk/`, build and test, then regenerate the patch. Mark the new
-files first, or the diff leaves them out:
+Edit the files in the SDK checkout (`~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk`),
+build and test, then save the patch:
 
 ```bash
-git -C .sdk/muse-gadget-sdk add -N esp32/components/muse/muse_gemini_tts.c esp32/components/muse/muse_gemini_tts.h \
-    esp32/components/muse/muse_xai_tts.c esp32/components/muse/muse_xai_tts.h \
-    esp32/components/muse/fonts/muse_font_bold_20.c esp32/partitions_stopwatch.csv
-git -C .sdk/muse-gadget-sdk diff > patches/0001-stopwatch-customizations.patch
-git -C .sdk/muse-gadget-sdk reset -q
+./scripts/save-patch.sh
 ```
 
-Check the patch for keys before committing (`docs/token.md`, "Never-commit checklist").
+It includes every new file under `esp32/components/muse/` (except `tape/`, which `build.sh` copies
+in) and `esp32/partitions_stopwatch.csv`, so a new file needs no list. It checks that the patch
+applies to a clean checkout of the pinned commit, and scans it for keys: the shapes of a Google or
+xAI key or an SDK token, and the copies saved in `~/.config/stopwatch/` (`docs/token.md`). It
+replaces `patches/0001-stopwatch-customizations.patch` only if every check passes.
+
+A new file elsewhere in the SDK still needs `git -C <SDK> add -N <file>` before the script runs,
+and `git -C <SDK> reset -q <file>` after. Read the diff before committing (`docs/token.md`,
+"Never-commit checklist").
 
 ## Safety notes
 
@@ -511,6 +525,8 @@ Check the patch for keys before committing (`docs/token.md`, "Never-commit check
     `sdkconfig`. Delete `build-muse-m5stack-stopwatch/` and rebuild.
 - **No sound at all:** change the volume in Settings. If you hear the beep, the speaker works.
 - **Patch doesn't apply:** the SDK checkout has local edits. Follow the commands `build.sh` prints,
-  or delete `.sdk/` and rebuild.
+  or delete `~/Library/Caches/stopwatch-muse-gadget/muse-gadget-sdk` and rebuild.
+- **`... is in use`:** another build or flash holds the SDK checkout. The message names it. Wait,
+  or set `LOCK_WAIT`. If that process is gone, the next run takes the lock over.
 - **Serial port permissions on Linux:** `pip install esptool` gives the serial port the permissions
   it needs on some setups.
