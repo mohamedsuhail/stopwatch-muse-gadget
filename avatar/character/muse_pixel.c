@@ -10,8 +10,10 @@
  * decoder also finds what changed, so only that is redrawn. The shown frame
  * is scaled to the canvas: 3:2 (256 px to 384) and 2x by repeating and
  * averaging pixels, anything else bilinearly. Wake and goodbye play once and
- * hold their last frame; the rest loop. Without the partition (or with a bad
- * one) the canvas stays black.
+ * hold their last frame; the rest loop. When the clip changes, the new one
+ * fades in over its first three frames from a still of the last frame shown
+ * (decoding the old clip as well would take two decodes a frame). Without the
+ * partition (or with a bad one) the canvas stays black.
  *
  * Everything is read with esp_partition_read() rather than through a
  * mapping: with XIP from PSRAM the UI keeps running while NVS writes flash,
@@ -40,6 +42,14 @@ static const char *TAG = "muse_anim";
 #define PART_NAME "anims"
 #define MAX_SIDE 256
 #define DECODER_PRIORITY 4   /* just below the UI (5) and audio (6), above the network's background work */
+#define FADE_FRAMES 3        /* a new clip's first frames, blended 3/4, 1/2, 1/4 with the last one shown */
+
+/* What the UI asks the decoder for: a frame, how much of the still to blend
+ * in (quarters, 0: none), and which clip change the still belongs to. */
+#define WANT(frame, mix, gen) ((frame) | (mix) << 16 | ((gen) & 0x1fff) << 18)
+#define WANT_FRAME(w) ((w) & 0xffff)
+#define WANT_MIX(w) ((w) >> 16 & 3)
+#define WANT_GEN(w) ((w) >> 18)
 
 enum { CLIP_WAKE, CLIP_IDLE, CLIP_LISTENING, CLIP_THINKING, CLIP_SPEAKING, CLIP_HAPPY, CLIP_ERROR,
        CLIP_GOODBYE, CLIP_COUNT };
@@ -59,13 +69,14 @@ static bool s_tried, s_ok;
 
 static uint16_t *s_frame;            /* the shown frame, RGB565 (the UI's) */
 static uint16_t *s_back;             /* the next one (the decoder's, until it's ready) */
-static int s_shown = -1;             /* s_frame's global frame number */
+static uint16_t *s_hold;             /* the last frame shown before the clip changed (the decoder's) */
+static int s_shown = -1;             /* what s_frame shows: a WANT() */
 static int s_back_dirty[4];          /* where s_back differs from s_frame: x1, y1, x2, y2 (x2 < 0: nowhere) */
 static bool s_dirty_all = true;      /* redraw the whole canvas (the first frame) */
 static int s_dirty[4] = { 0, 0, -1, -1 };   /* source pixels changed since the UI last asked */
 static TaskHandle_t s_decoder;
-static atomic_int s_want = -1;       /* the frame the UI asked for */
-static atomic_int s_ready = -1;      /* s_back holds this frame, for the UI to swap in; -1: the decoder's */
+static atomic_int s_want = -1;       /* what the UI asked for: a WANT() */
+static atomic_int s_ready = -1;      /* s_back holds this WANT(), for the UI to swap in; -1: the decoder's */
 
 /* Accents for the UI around the avatar (the ring and level bars), from the astronaut's suit. */
 static const uint32_t ACCENT[MUSE_MODE_COUNT] = {
@@ -152,8 +163,9 @@ static bool open_pack(void)
     /* esp_new_jpeg writes 16 bytes at a time: its output must be 16-byte aligned. */
     s_frame = heap_caps_aligned_calloc(16, (size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_back = heap_caps_aligned_calloc(16, (size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_hold = heap_caps_aligned_calloc(16, (size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_jpeg = heap_caps_malloc(biggest, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_frame || !s_back || !s_jpeg) {
+    if (!s_frame || !s_back || !s_hold || !s_jpeg) {
         return false;
     }
     jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
@@ -246,13 +258,38 @@ static void find_changes(const uint16_t *was, const uint16_t *now, int box[4])
     box[0] = x1, box[1] = y1, box[2] = x2, box[3] = y2;
 }
 
-/* Decodes a frame into s_back. A failure (logged once per run of them) leaves
- * the frame unshown, so the next tick asks again. */
-static bool decode(int frame)
+/* Per-channel average of two pairs of RGB565 pixels, with no multiplies. */
+static inline uint32_t avg565x2(uint32_t a, uint32_t b)
+{
+    return (a & b) + (((a ^ b) & 0xf7def7de) >> 1);
+}
+
+/* Blends the still into s_back: mix quarters of it (1..3), two pixels at a time. */
+static void blend_hold(int mix)
+{
+    const uint32_t *h = (const uint32_t *)s_hold;
+    uint32_t *b = (uint32_t *)s_back;
+    for (int i = 0, n = s_w * s_h / 2; i < n; i++) {
+        uint32_t half = avg565x2(h[i], b[i]);
+        b[i] = mix == 2 ? half : avg565x2(mix == 3 ? h[i] : b[i], half);
+    }
+}
+
+/* Decodes what the UI asked for into s_back: the frame, blended with the still
+ * while a clip fades in (which the first blend of a clip change takes from the
+ * shown frame). A failure (logged once per run of them) leaves the frame
+ * unshown, so the next tick asks again. */
+static bool decode(int want)
 {
     static int s_failing;        /* failures in a row */
+    static int s_hold_gen;       /* the clip change s_hold belongs to */
+    int frame = WANT_FRAME(want), mix = WANT_MIX(want);
     uint32_t size = s_index[frame * 2 + 1];
     int64_t t0 = esp_timer_get_time();
+    if (mix && WANT_GEN(want) != s_hold_gen) {
+        memcpy(s_hold, s_frame, (size_t)s_w * s_h * sizeof(uint16_t));
+        s_hold_gen = WANT_GEN(want);
+    }
     jpeg_error_t r = JPEG_ERR_FAIL;
     if (esp_partition_read(s_part, s_index[frame * 2], s_jpeg, size) == ESP_OK && s_jpeg[0] == 0xff &&
         s_jpeg[1] == 0xd8) {
@@ -276,8 +313,11 @@ static bool decode(int frame)
         ESP_LOGI(TAG, "frames decode again (after %d failures)", s_failing);
         s_failing = 0;
     }
-    /* How long decodes take, once over the first few seconds: past a frame's
-     * time, frames show late. */
+    if (mix) {
+        blend_hold(mix);
+    }
+    /* How long decodes (and blends) take, once over the first few seconds:
+     * past a frame's time, frames show late. */
     static int s_count, s_late;
     static int64_t s_total, s_max;
     if (s_count < 10 * s_fps) {
@@ -301,18 +341,47 @@ static void decoder(void *arg)
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        int frame = atomic_load(&s_want);
-        if (frame >= 0 && atomic_load(&s_ready) < 0 && decode(frame)) {
+        int want = atomic_load(&s_want);
+        if (want >= 0 && atomic_load(&s_ready) < 0 && decode(want)) {
             find_changes(s_frame, s_back, s_back_dirty);
-            atomic_store(&s_ready, frame);
+            atomic_store(&s_ready, want);
         }
     }
 }
 
 /* --- frame choice -------------------------------------------------------------------- */
 
+/* A loop clip played as a face is shown for at least this long, then gives way to talking. */
+#define REACT_MIN_SECS 2.5f
+
+/*
+ * The clip for a face Muse asked for in its reply, or -1 once it's played.
+ * Goodnight (waving, then asleep) plays once and holds until the reply ends.
+ */
+static int reaction_clip(const muse_pose_t *p)
+{
+    static const int8_t CLIP_OF[] = {
+        [MUSE_REACT_JOY] = CLIP_HAPPY,
+        [MUSE_REACT_THINKING] = CLIP_THINKING,
+        [MUSE_REACT_SAD] = CLIP_ERROR,
+        [MUSE_REACT_GOODNIGHT] = CLIP_GOODBYE,
+    };
+    if (p->reaction <= MUSE_REACT_NONE || p->reaction > MUSE_REACT_GOODNIGHT ||
+        (p->mode != MUSE_MODE_SPEAKING && p->mode != MUSE_MODE_THINKING)) {
+        return -1;
+    }
+    int clip = CLIP_OF[p->reaction];
+    float secs = (float)s_clips[clip].count / s_fps;
+    secs = secs > REACT_MIN_SECS ? secs : REACT_MIN_SECS;
+    return p->reaction == MUSE_REACT_GOODNIGHT || p->reaction_t < secs ? clip : -1;
+}
+
 static int clip_for(const muse_pose_t *p)
 {
+    int face = reaction_clip(p);
+    if (face >= 0) {
+        return face;
+    }
     if (p->happy > 0.2f && p->mode != MUSE_MODE_ERROR) {
         return CLIP_HAPPY;
     }
@@ -363,18 +432,23 @@ void muse_pixel_render(const muse_pose_t *p)
         return;
     }
     log_ticks();
-    /* A clip starts from its first frame when it comes on. */
-    static int s_clip = -1;
+    /* A clip starts from its first frame when it comes on, fading in over
+     * what was shown (but not the first clip, over the blank canvas). */
+    static int s_clip = -1, s_gen;
     static float s_since;
+    static bool s_fade;
     int clip = clip_for(p);
     if (clip != s_clip) {
+        s_fade = s_clip >= 0;
+        s_gen += s_fade;
         s_clip = clip;
         s_since = p->t;
     }
     const clip_t *c = &s_clips[clip];
-    int n = (int)((p->t - s_since) * s_fps);
-    n = c->flags & 1 ? (n < c->count ? n : c->count - 1) : n % c->count;
-    int frame = c->first + n;
+    int t = (int)((p->t - s_since) * s_fps);
+    int n = c->flags & 1 ? (t < c->count ? t : c->count - 1) : t % c->count;
+    int mix = s_fade && t < FADE_FRAMES ? FADE_FRAMES - t : 0;
+    int want = WANT(c->first + n, mix, s_gen);
     /* Swap in what the decoder finished since the last tick... */
     int ready = atomic_load(&s_ready);
     if (ready >= 0) {
@@ -396,8 +470,8 @@ void muse_pixel_render(const muse_pose_t *p)
         atomic_store(&s_ready, -1);
     }
     /* ...and ask for this tick's frame, to show on the next. */
-    if (frame != s_shown && frame >= 0 && frame < (int)s_frames) {
-        atomic_store(&s_want, frame);
+    if (want != s_shown) {
+        atomic_store(&s_want, want);
         xTaskNotifyGive(s_decoder);
     }
 }

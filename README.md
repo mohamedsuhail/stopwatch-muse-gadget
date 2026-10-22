@@ -139,6 +139,12 @@ Without it, replies stay text captions. With it, the watch speaks them.
 To turn spoken replies off again, send `>gemini_key=` with nothing after it. The watch replies
 `@gemini_key cleared`. Full details: `docs/token.md`.
 
+**Or use xAI instead.** Gemini's TTS model allows 100 requests a day on Tier 1, and each reply takes
+a few. xAI's text to speech has no daily cap (it limits requests per second) and costs $15 per
+million characters. Create a key at [console.x.ai](https://console.x.ai) (it needs prepaid credit),
+then send `>xai_key=YOUR_KEY`. The watch replies `@xai_key ok`. While an xAI key is stored, every
+reply is spoken by xAI; send `>xai_key=` to clear it and go back to Gemini.
+
 ### 6. Pair
 
 1. In the Muse app: **Settings → Devices → Developer mode**.
@@ -203,7 +209,23 @@ leaves speech to "a text-to-speech API of your choice". The patch adds:
   - With the speaker off, or no key set, replies are shown as captions.
   - The turn's timing line includes `tts` (first piece sent) and `audio` (first sound), in ms
     after you let go of the button.
-- **`main/muse_glue.c`:** routes the `>gemini_key=` serial command.
+- **`components/muse/muse_xai_tts.c/.h`:** the same job through xAI's streaming text to speech
+  (`wss://api.x.ai/v1/tts`), used instead of Gemini whenever an xAI key is stored.
+  - A reply is one utterance on a WebSocket the worker keeps open: each piece goes in as a
+    `text.delta`, the end as `text.done`, and audio streams back until `audio.done`. A cancelled
+    reply closes the connection, which is the quickest way to stop the audio still coming.
+  - It asks for 16-bit mono PCM at 16 kHz, the speaker's rate, so nothing is resampled.
+  - The voice is `iris` (`VOICE` in that file); any of xAI's voices, or a custom voice ID, works.
+  - Only the provider in use opens a connection, so the two never hold TLS at once.
+  - While an xAI key is set, each message to Muse ends with a short hint: talk like a person, use
+    xAI's speech tags (`[laugh]`, `[pause]`, `<whisper>…</whisper>`…) where they fit, and pick a face
+    (`[face-joy]`, `[face-thinking]`, `[face-sad]`, `[face-goodnight]`). Face tags play the happy,
+    thinking, error or goodbye clip over the speaking one (`muse_state_react()`, `clip_for()` in
+    `avatar/character/muse_pixel.c`) and are cut out before the voice. The captions leave every tag
+    out. A wrapping tag is never split across the pieces sent to xAI.
+  - Each reply logs its timing, as
+    `reply (N sentences, N chars, kept connection): first audio N ms, Ns of speech in Ns`.
+- **`main/muse_glue.c`:** routes the `>gemini_key=` and `>xai_key=` serial commands.
 - **`devices/sdkconfig.muse-m5stack-stopwatch`:**
   - `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y`. Google's servers present GTS Root R4
     cross-signed by GlobalSign, and without this option the watch rejects the certificate.
@@ -262,13 +284,20 @@ state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind 
   background task decodes the next frame with Espressif's SIMD JPEG decoder (`esp_new_jpeg`, about
   22 ms a frame) into a second buffer, so the tick only swaps buffers. The decoder's stack and its
   tables are in PSRAM (the clip player supplies `esp_new_jpeg`'s allocators, preferring PSRAM),
-  so it takes no internal RAM, which Wi-Fi, TLS and BLE run short of. The decoder also finds the
+  so it takes no internal RAM, which Wi-Fi, TLS and BLE run short of. `docs/internal-ram.md` has
+  where the rest goes and the fixes that keep the low point near 18K. The decoder also finds the
   box of pixels that changed, and only that box is redrawn (`muse_pixel_dirty()`, a hook the patch
   adds to `muse_pixel.h`; other avatars keep the UI's own per-cell check). The 256 px frame is
   scaled 3:2 to the 384 px canvas by repeating and averaging pixels (each pair a, b becomes
   a, (a+b)/2, b), which needs no multiplies.
+- **Clip changes:** the new clip fades in over its first three frames (125 ms), blended 3/4, 1/2
+  and 1/4 with a still of the last frame shown. The decoder copies that still into a third 128 KB
+  PSRAM buffer at the change and blends it into each decoded frame, two pixels at a time with the
+  same no-multiply averaging. Fading from the old clip still moving would take two decodes a frame,
+  more than the 42 ms tick. Starting the new clip at its best-matching frame instead was tried and
+  barely helps, since the clips' poses differ too much.
 - **Timing:** the log reports decode and tick times once after boot (`muse_anim: ... frames decode
-  in ...` and `... ticks at ... ms apart`).
+  in ...`, which includes any blending, and `... ticks at ... ms apart`).
 - **Preview:** `avatar/character/preview.gif` shows every clip.
 
 **The pixel astronaut.** `avatar/muse_pixel.c` draws the same character as 64 px pixel art (white
@@ -428,7 +457,8 @@ stopwatch-muse-gadget/
 │   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
-│   └── token.md          # SDK token and Gemini key: how to set them, never-commit rules
+│   ├── internal-ram.md   # where the StopWatch's internal RAM goes, and the fixes that won it back
+│   └── token.md          # SDK token, Gemini and xAI keys: how to set them, never-commit rules
 ├── backups/              # factory flash backup (gitignored)
 └── .sdk/                 # SDK checkout (gitignored; created by build.sh)
     └── muse-gadget-sdk/  # pinned at fa073045a5572a8e3367fae142c1b7a7c554f222, patched
@@ -441,6 +471,7 @@ files first, or the diff leaves them out:
 
 ```bash
 git -C .sdk/muse-gadget-sdk add -N esp32/components/muse/muse_gemini_tts.c esp32/components/muse/muse_gemini_tts.h \
+    esp32/components/muse/muse_xai_tts.c esp32/components/muse/muse_xai_tts.h \
     esp32/components/muse/fonts/muse_font_bold_20.c esp32/partitions_stopwatch.csv
 git -C .sdk/muse-gadget-sdk diff > patches/0001-stopwatch-customizations.patch
 git -C .sdk/muse-gadget-sdk reset -q

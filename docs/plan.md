@@ -46,11 +46,20 @@ Done:
       already have retired, and a failed store is logged as an error. Every flash and reset since kept
       the pairing: boots no longer refresh the token. (Opening the serial port resets the watch even
       with DTR and RTS low, but that's now harmless.)
-- [ ] **Spoken replies stopped (Oct 22): Gemini's free daily quota.** The TTS API answered HTTP 429,
-      "limit: 100 requests per day on Tier 1". Each sentence is one request, so a reply costs 2–4,
-      and a day of testing used it up; replies show as text until it resets. Options: a higher
-      tier in Google AI Studio, or fewer requests per reply (the first sentence alone for a quick
-      start, the rest in one request).
+- [x] **Spoken replies stopped (Oct 22): Gemini's free daily quota.** The TTS API answered HTTP 429,
+      "limit: 100 requests per day on Tier 1"; each sentence is one request, so a reply costs 2–4.
+      Fixed by adding xAI text to speech (no daily cap), used whenever `>xai_key=` is set: first
+      audio about 0.33 s after the reply text, against about 1 s with Gemini. Gemini stays as the
+      fallback with its key.
+- [x] xAI speech tags (`[pause]`, `[laugh]`, `<whisper>`) and face tags (`[face-joy]`…) that play
+      the happy, thinking, error or goodbye clip; all tags are left out of the captions. Heard on
+      the watch: replies speak; whether whispers are performed is still to confirm by ear.
+- [x] Clip changes fade in over three frames (125 ms) instead of cutting.
+- [x] Internal RAM: four fixes (`docs/internal-ram.md`) took the lowest free internal RAM from 5–6K
+      back to 18K, measured idle and through four spoken xAI replies.
+- [ ] Move the SDK checkout and build folder out of iCloud-synced `~/Documents` (`SDK_DIR`).
+      iCloud offloaded files mid-build and left conflict copies (`dependencies 2.lock`), which broke
+      or slowed several builds on Oct 22. The xAI session already builds in `~/Library/Caches`.
 - [x] Avatar as video clips (Oct 22): one clip per state, packed into a new `anims` flash
       partition and played by `avatar/character/muse_pixel.c`. The screen went black and white, and
       the state word is hidden since the clips show the state. Builds; **still to check

@@ -6,6 +6,7 @@ This firmware uses two secrets. Neither belongs in git.
 | --- | --- | --- | --- |
 | Muse Gadget SDK token | Pairing and working with the Muse app | No | `>sdk_token=...` over serial, or menuconfig |
 | Gemini API key | Spoken replies (Gemini TTS) | No | `>gemini_key=...` over serial only |
+| xAI API key | Spoken replies (xAI TTS, used instead of Gemini when set) | No | `>xai_key=...` over serial only |
 
 Most of this page covers the SDK token. The Gemini key has
 [its own section](#gemini-api-key-spoken-replies) below. The never-commit checklist and the leak
@@ -168,6 +169,24 @@ mkdir -p ~/.config/stopwatch && read -rs "?Gemini API key: " k && printf %s "$k"
 
 Scripts read it with `$(cat ~/.config/stopwatch/gemini_key)`. Don't `echo` it or paste it into
 chats, issues or logs.
+
+## xAI API key (spoken replies, no daily cap)
+
+With an xAI key stored, the watch speaks replies through xAI's text to speech
+(`muse_xai_tts.c`) instead of Gemini. Create one at [console.x.ai](https://console.x.ai); it needs
+prepaid credit. It works exactly like the Gemini key:
+
+```
+>xai_key=YOUR_KEY
+```
+
+- The watch answers `@xai_key ok`, or `@xai_key error invalid` / `@xai_key error storage` as above.
+- It's kept in NVS (namespace `muse_tts`, key `xai_key`), unencrypted, and never logged.
+- `>xai_key=` with nothing after it answers `@xai_key cleared`, and replies go back to Gemini.
+- A refused key or empty balance shows in the serial log as `muse_xai_tts: HTTP 4xx: ...`.
+
+The same never-commit rules apply. Keep a copy at `~/.config/stopwatch/xai_key` with the prompt
+above (change the file name), and check commits against it too.
 
 ## Never-commit checklist
 

@@ -1,5 +1,5 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 73c8ffa..01f84f3 100644
+index 73c8ffa..cf86355 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -43,12 +43,18 @@ if(CONFIG_MUSE_ENABLED)
@@ -7,7 +7,7 @@ index 73c8ffa..01f84f3 100644
          "muse_ble.c")
      if(CONFIG_MUSE_HATCH)
 -        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
-+        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_gemini_tts.c")
++        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_gemini_tts.c" "muse_xai_tts.c")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
      else()
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
@@ -42,10 +42,19 @@ index 73c8ffa..01f84f3 100644
  if(CONFIG_MUSE_ENABLED)
      # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..126c7a3 100644
+index 7330e5e..c426269 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-@@ -1095,7 +1095,18 @@ static const muse_board_t s_board = {
+@@ -615,6 +615,8 @@ static lv_display_t *display_start(lv_indev_t **touch)
+     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
+     adapter_cfg.task_core_id = MUSE_UI_CORE;
+     adapter_cfg.task_priority = MUSE_UI_PRIORITY;
++    /* Safe in PSRAM: with code and rodata there too, flash writes never turn the cache off. */
++    adapter_cfg.stack_in_psram = true;
+     if (esp_lv_adapter_init(&adapter_cfg) != ESP_OK) {
+         return NULL;
+     }
+@@ -1095,7 +1097,18 @@ static const muse_board_t s_board = {
      .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
@@ -1612,7 +1621,7 @@ index ddf486b..903cc96 100644
      /* Power rails, buses, expanders. Runs first. */
      esp_err_t (*init)(void);
 diff --git a/esp32/components/muse/muse_chat_priv.h b/esp32/components/muse/muse_chat_priv.h
-index 855b101..2157fdc 100644
+index 855b101..9f3cd8e 100644
 --- a/esp32/components/muse/muse_chat_priv.h
 +++ b/esp32/components/muse/muse_chat_priv.h
 @@ -69,9 +69,20 @@ static inline void muse_chat_reject(muse_chat_rejected_t *rejected, const char *
@@ -1637,19 +1646,37 @@ index 855b101..2157fdc 100644
      "\"mime_type\":\"audio/wav\",\"filename\":\"voice_note.wav\",\"data_base64\":\""
  #define MUSE_HATCH_NOTE_TAIL "\"}]}"
  #define MUSE_HATCH_WAV_HEADER 44
+@@ -87,6 +98,13 @@ size_t muse_hatch_base64(const uint8_t *in, size_t n, char *out);
+ void muse_hatch_tail_words(const char *src, char *out, size_t cap);
+ bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap);
+ 
++/* Drops xAI speech tags ("[laugh]", "<whisper>", "</whisper>") from `in`,
++ * which are for the voice, not the screen. `out` may be `in`. If `at` is
++ * given, it's moved to the same place in the result. Returns the new length. */
++size_t muse_hatch_strip_tags(const char *in, char *out, size_t cap, size_t *at);
++/* The length of the speech tag at `p`, or 0 if there isn't one there. */
++size_t muse_hatch_tag_len(const char *p);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
-index 2866f5d..129e753 100644
+index 2866f5d..9151c26 100644
 --- a/esp32/components/muse/muse_chat_session.cpp
 +++ b/esp32/components/muse/muse_chat_session.cpp
-@@ -67,6 +67,7 @@ extern "C" {
+@@ -67,8 +67,11 @@ extern "C" {
  #include "cJSON.h"
  #include "minimp3.h"
  #include "muse_account_api.h"
 +#include "muse_gemini_tts.h"
++#include "muse_xai_tts.h"
  #include "muse_link.h"
  #include "muse_settings.h"
++#include "muse_state.h"
  #include "muse_wifi.h"
-@@ -152,6 +153,7 @@ struct ev_t {
+ }
+ #include "muse_chat_priv.h"
+@@ -152,6 +155,7 @@ struct ev_t {
  
  static QueueHandle_t s_cmds, s_events;
  static StreamBufferHandle_t s_in, s_out;
@@ -1657,7 +1684,7 @@ index 2866f5d..129e753 100644
  static std::atomic<uint32_t> s_gen{0};
  static std::atomic<bool> s_resting{false};
  
-@@ -209,6 +211,8 @@ struct msg_t {
+@@ -209,6 +213,8 @@ struct msg_t {
      tts_t tts;
      uint32_t pcm_start;      /* where its speech starts in the reply audio */
      uint32_t pcm_frames;     /* how long it is; 0 until the MP3 has all arrived */
@@ -1666,7 +1693,7 @@ index 2866f5d..129e753 100644
  };
  
  struct resampler_t {
-@@ -244,6 +248,7 @@ struct turn_t {
+@@ -244,6 +250,7 @@ struct turn_t {
      /* TTS */
      int tts_msg;             /* message being fetched (or shown, speaker off), or -1 */
      bool silent;             /* speaker off: tts_msg is paced by silence, not fetched */
@@ -1674,7 +1701,7 @@ index 2866f5d..129e753 100644
      uint8_t *mp3;            /* MP3_BUF */
      size_t mp3_len;
      bool mp3_ended;
-@@ -963,6 +968,10 @@ static void turn_finish(void)
+@@ -963,6 +970,10 @@ static void turn_finish(void)
      turn_reset_streams();
      s_turn.phase = P_IDLE;
      s_turn.dict_id = s_turn.chat_id = 0;
@@ -1685,7 +1712,7 @@ index 2866f5d..129e753 100644
      s_turn.tts_msg = -1;
      s_turn.silent = false;
      s_turn.mp3_len = 0;
-@@ -1009,6 +1018,9 @@ static bool turn_start(uint32_t gen, bool text)
+@@ -1009,6 +1020,9 @@ static bool turn_start(uint32_t gen, bool text)
      s_turn.gen = gen;
      s_turn.text = text;
      s_turn.tts_msg = -1;
@@ -1695,7 +1722,111 @@ index 2866f5d..129e753 100644
      memset(s_marks, 0, sizeof(s_marks));
      s_reply_shown[0] = '\0';
      s_turn.start_us = now_us();
-@@ -1508,6 +1520,157 @@ static void on_chat_ack(stream_t *s)
+@@ -1120,16 +1134,22 @@ static bool send_note_part(bool last)
+  * isn't known until the end, so the WAV header gives the streaming "unknown"
+  * size and the server reads to the end of the data.
+  */
++static char *note_head(size_t *len);
++
+ static bool open_note(void)
+ {
+     s_turn.chat_id = open_stream(K_CHAT, "POST", "/chat/stream", "application/json", nullptr, nullptr, false);
+     if (!s_turn.chat_id) {
+         return false;
+     }
+-    s_turn.body_sent = sizeof(MUSE_HATCH_NOTE_HEAD) - 1;
+-    if (!send_body(s_turn.chat_id, reinterpret_cast<const uint8_t *>(MUSE_HATCH_NOTE_HEAD), sizeof(MUSE_HATCH_NOTE_HEAD) - 1, false)) {
++    size_t head_len = 0;
++    char *head = note_head(&head_len);
++    bool sent = head && send_body(s_turn.chat_id, reinterpret_cast<const uint8_t *>(head), head_len, false);
++    cJSON_free(head);
++    if (!sent) {
+         return false;
+     }
++    s_turn.body_sent = head_len;
+     muse_hatch_wav_header(s_turn.note, MIC_RATE);
+     s_turn.note_len = MUSE_HATCH_WAV_HEADER;
+     return true;
+@@ -1176,11 +1196,78 @@ static bool record_note(void)
+  * Posts `text` to the chat and waits for the reply. A long message goes up in
+  * parts, since each frame has to fit SCRATCH.
+  */
++/*
++ * Added to what's sent while xAI speaks the replies: its voice acts out these
++ * tags (muse_xai_tts.h), and the captions leave them out
++ * (muse_hatch_strip_tags). Gemini would read them aloud, so it never gets them.
++ */
++static const char SPEECH_TAG_HINT[] =
++    "\n\n(Your reply is spoken aloud from my watch, so talk like a person, not a document: short "
++    "sentences, contractions, no lists, markdown or emoji. The voice acts out tags, so use them the way "
++    "people really sound, only where the moment calls for it: usually one or two a reply, often none. "
++    "[laugh] or [chuckle] after something funny, [pause] before a punchline or a surprise, [sigh] for "
++    "sympathy or mild frustration, [breath] before a longer thought, <whisper>...</whisper> for a secret "
++    "or an aside, <emphasis>...</emphasis> on the one word that matters, <soft>...</soft> for something "
++    "gentle, <slow>...</slow> for something important. Also: [long-pause] [giggle] [inhale] [exhale] "
++    "[tsk] <loud> <fast> <sing-song>. Wrap only a short phrase, never stack tags, never mention them. "
++    "My face can react too: put [face-joy] (hops with joy), [face-thinking], [face-sad] (shakes its "
++    "head) or [face-goodnight] (waves, then falls asleep: only to end a goodnight or goodbye) right "
++    "where the feeling starts, at most one or two a reply.)";
++
++/*
++ * MUSE_HATCH_NOTE_HEAD with the speech-tag hint added to the voice note's
++ * message while xAI speaks the replies: a spoken turn's words are in the
++ * audio, so the message is the only place Muse gets the hint. *len is set.
++ */
++static char *note_head(size_t *len)
++{
++    bool hint = muse_settings_speaker_on() && muse_xai_tts_configured();
++    cJSON *msg = cJSON_CreateString(hint ? MUSE_VOICE_NOTE_STYLE " " : MUSE_VOICE_NOTE_STYLE);
++    if (msg && hint) {
++        /* The hint without the blank line it starts with in a typed message. */
++        size_t n = strlen(msg->valuestring) + sizeof(SPEECH_TAG_HINT);
++        char *both = static_cast<char *>(malloc(n));
++        if (both) {
++            snprintf(both, n, "%s%s", msg->valuestring, SPEECH_TAG_HINT + 2);
++            cJSON_SetValuestring(msg, both);
++            free(both);
++        }
++    }
++    char *quoted = msg ? cJSON_PrintUnformatted(msg) : nullptr;
++    cJSON_Delete(msg);
++    if (!quoted) {
++        return nullptr;
++    }
++    /* The head's fields after its message, as MUSE_HATCH_NOTE_HEAD has them. */
++    const char *rest = strstr(MUSE_HATCH_NOTE_HEAD, "\",\"output_modality\"") + 1;
++    size_t n = strlen("{\"message\":") + strlen(quoted) + strlen(rest) + 1;
++    char *head = static_cast<char *>(cJSON_malloc(n));
++    if (head) {
++        *len = (size_t)snprintf(head, n, "{\"message\":%s%s", quoted, rest);
++        if (hint) {
++            ESP_LOGI(TAG, "voice note carries the speech-tag hint");
++        }
++    }
++    cJSON_free(quoted);
++    return head;
++}
++
+ static void send_chat(const char *text, const char *modality)
+ {
+     s_turn.chat_posted = true;
+     cJSON *body = cJSON_CreateObject();
++    char *hinted = nullptr;
++    if (muse_settings_speaker_on() && muse_xai_tts_configured()) {
++        size_t n = strlen(text);
++        hinted = static_cast<char *>(malloc(n + sizeof(SPEECH_TAG_HINT)));
++        if (hinted) {
++            memcpy(hinted, text, n);
++            memcpy(hinted + n, SPEECH_TAG_HINT, sizeof(SPEECH_TAG_HINT));
++            text = hinted;
++        }
++    }
+     cJSON_AddStringToObject(body, "message", text);
++    free(hinted);
+     cJSON_AddStringToObject(body, "output_modality", modality);
+     char *json = cJSON_PrintUnformatted(body);
+     cJSON_Delete(body);
+@@ -1508,6 +1595,234 @@ static void on_chat_ack(stream_t *s)
  
  /* ---- Turn: speech ---- */
  
@@ -1724,7 +1855,38 @@ index 2866f5d..129e753 100644
 + * more. A sentence ends at . ! ? followed by a space, or at a line break; a
 + * number's period ("1. ") doesn't count.
 + */
++/*
++ * A cut that would leave a wrapping speech tag open ("<whisper>It was. Then
++ * it" with "</whisper>" still to come) moves to just past its closing tag, so
++ * the voice gets the tag pair in one piece. 0 if that tag hasn't come yet.
++ */
++static size_t past_open_tags(const char *full, size_t from, size_t cut, size_t have, bool done)
++{
++    int depth = 0;
++    for (size_t i = from; i < have;) {
++        if (i >= cut && depth <= 0) {
++            return i;
++        }
++        size_t t = full[i] == '<' ? muse_hatch_tag_len(full + i) : 0;
++        if (t) {
++            depth += full[i + 1] == '/' ? -1 : 1;
++            i += t;
++            continue;
++        }
++        i++;
++    }
++    return depth > 0 ? (done ? have : 0) : have > cut ? have : cut;
++}
++
++static size_t sentence_cut(const char *full, size_t from, size_t have, bool done);
++
 +static size_t speech_cut(const char *full, size_t from, size_t have, bool done)
++{
++    size_t cut = sentence_cut(full, from, have, done);
++    return cut ? past_open_tags(full, from, cut, have, done) : 0;
++}
++
++static size_t sentence_cut(const char *full, size_t from, size_t have, bool done)
 +{
 +    size_t min = from ? NEXT_SPEECH_MIN : FIRST_SPEECH_MIN;
 +    size_t last_space = 0;
@@ -1818,6 +1980,47 @@ index 2866f5d..129e753 100644
 +    return o;
 +}
 +
++/*
++ * Face tags in a piece of the reply ("[face-joy]"): each sets the avatar's
++ * face (muse_state_react) and is cut out, so the voice never says it. An
++ * unknown "[face-...]" is cut out too. Returns the new length.
++ */
++static size_t take_faces(char *s, size_t n)
++{
++    static const struct {
++        const char *tag;
++        muse_reaction_t reaction;
++    } FACES[] = {
++        { "[face-joy]", MUSE_REACT_JOY },
++        { "[face-thinking]", MUSE_REACT_THINKING },
++        { "[face-sad]", MUSE_REACT_SAD },
++        { "[face-goodnight]", MUSE_REACT_GOODNIGHT },
++    };
++    size_t o = 0;
++    for (size_t i = 0; i < n;) {
++        size_t t = s[i] == '[' && !strncmp(s + i, "[face-", 6) ? muse_hatch_tag_len(s + i) : 0;
++        if (!t) {
++            s[o++] = s[i++];
++            continue;
++        }
++        for (const auto &f : FACES) {
++            if (strlen(f.tag) == t && !memcmp(s + i, f.tag, t)) {
++                ESP_LOGI(TAG, "face: %s", f.tag);
++                muse_state_react(f.reaction);
++            }
++        }
++        i += t;
++        if (i < n && s[i] == ' ' && (!o || s[o - 1] == ' ' || s[o - 1] == '\n')) {
++            i++;   /* "word [face-joy] word" leaves one space */
++        }
++    }
++    while (o && s[o - 1] == ' ') {
++        o--;
++    }
++    s[o] = '\0';
++    return o;
++}
++
 +/* Hands the reply's next complete sentences to Gemini, and ends it once all of it has gone. */
 +static void feed_sentences(msg_t &m)
 +{
@@ -1837,6 +2040,11 @@ index 2866f5d..129e753 100644
 +        }
 +        char clean[TEXT_MAX];
 +        size_t n = cut > a ? speakable(full + a, cut - a, clean) : 0;
++        n = n ? take_faces(clean, n) : 0;
++        if (n && !muse_xai_tts_configured()) {
++            clean[n] = '\0';
++            n = muse_hatch_strip_tags(clean, clean, sizeof(clean), nullptr);   /* Gemini would say them */
++        }
 +        if (n && !muse_gemini_tts_say(clean, n)) {
 +            ESP_LOGW(TAG, "couldn't queue speech; the rest is shown");
 +            m.spoken = (uint16_t)have;
@@ -1853,7 +2061,7 @@ index 2866f5d..129e753 100644
  static void start_tts(void)
  {
      if (s_turn.tts_msg >= 0) {
-@@ -1515,7 +1678,9 @@ static void start_tts(void)
+@@ -1515,7 +1830,9 @@ static void start_tts(void)
      }
      for (int i = 0; i < s_turn.nmsgs; i++) {
          msg_t &m = s_turn.msgs[i];
@@ -1864,7 +2072,7 @@ index 2866f5d..129e753 100644
              continue;
          }
          /*
-@@ -1534,9 +1699,24 @@ static void start_tts(void)
+@@ -1534,9 +1851,24 @@ static void start_tts(void)
           * and finishes the message once it's drained.
           */
          m.pcm_start = s_turn.pcm_out;
@@ -1880,8 +2088,8 @@ index 2866f5d..129e753 100644
 +            s_turn.gemini = true;
 +            s_turn.silent = false;
 +            mark(M_TTS);
-+            ESP_LOGI(TAG, "speaking message %s with Gemini (%u chars so far%s)", m.id, (unsigned)m.len,
-+                     m.done ? ", complete" : "");
++            ESP_LOGI(TAG, "speaking message %s with %s (%u chars so far%s)", m.id,
++                     muse_xai_tts_configured() ? "xAI" : "Gemini", (unsigned)m.len, m.done ? ", complete" : "");
 +            show_reply_start(m);
 +            feed_sentences(m);
 +            return;
@@ -1890,7 +2098,7 @@ index 2866f5d..129e753 100644
          s_turn.silent = true;
          ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
          show_reply_start(m);
-@@ -1588,12 +1768,75 @@ static void pace_silently(void)
+@@ -1588,12 +1920,75 @@ static void pace_silently(void)
      }
  }
  
@@ -1945,7 +2153,7 @@ index 2866f5d..129e753 100644
 +    } else if (st == MUSE_GEMINI_TTS_FAILED || st == MUSE_GEMINI_TTS_IDLE) {
 +        /* No speech came: show the reply at reading pace instead. */
 +        have_odd = false;
-+        ESP_LOGW(TAG, "no speech from Gemini; showing the reply");
++        ESP_LOGW(TAG, "no speech from %s; showing the reply", muse_xai_tts_configured() ? "xAI" : "Gemini");
 +        s_turn.gemini = false;
 +        s_turn.silent = true;
 +        m.pcm_start = s_turn.pcm_out;
@@ -1966,20 +2174,124 @@ index 2866f5d..129e753 100644
      if (s_turn.silent) {
          pace_silently();
          return;
-@@ -2058,6 +2301,7 @@ extern "C" void muse_hatch_start(void)
+@@ -2058,6 +2453,10 @@ extern "C" void muse_hatch_start(void)
      }
      s_in = xStreamBufferCreateWithCaps(IN_BYTES, 1, MALLOC_CAP_SPIRAM);
      s_out = xStreamBufferCreateWithCaps(OUT_BYTES, 1, MALLOC_CAP_SPIRAM);
-+    s_tts_pcm = xStreamBufferCreateWithCaps(MIC_RATE * 2 * 4, 1, MALLOC_CAP_SPIRAM);   /* 4 s; spoken replies are off without it */
++    /* 16 s, so Gemini's speech fits whole and the worker keeps reading: while it waits on a full
++     * buffer, the unread stream piles up in Wi-Fi's internal RX buffers. Spoken replies are off
++     * without it. */
++    s_tts_pcm = xStreamBufferCreateWithCaps(MIC_RATE * 2 * 16, 1, MALLOC_CAP_SPIRAM);
      s_turn.chunk = static_cast<uint8_t *>(psram_alloc(DICT_CHUNK_BYTES + sizeof(MUSE_HATCH_NOTE_TAIL)));
      s_turn.mp3 = static_cast<uint8_t *>(psram_alloc(MP3_BUF));
      s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
+diff --git a/esp32/components/muse/muse_chat_text.c b/esp32/components/muse/muse_chat_text.c
+index a79641d..cf4c3e1 100644
+--- a/esp32/components/muse/muse_chat_text.c
++++ b/esp32/components/muse/muse_chat_text.c
+@@ -21,8 +21,11 @@
+ 
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
++#include "esp_heap_caps.h"
++
+ #include "muse_state.h"
+ #include "muse_text.h"
+ 
+@@ -145,13 +148,68 @@ static bool next_line(const char **text, int cols, const char **start, size_t *l
+     return end != p;
+ }
+ 
++/* The length of the speech tag starting at `p` ("[pause]", "<whisper>",
++ * "</whisper>": lowercase letters and hyphens), or 0 if there isn't one. */
++size_t muse_hatch_tag_len(const char *p)
++{
++    char close = *p == '[' ? ']' : *p == '<' ? '>' : 0;
++    if (!close) {
++        return 0;
++    }
++    size_t i = 1;
++    if (close == '>' && p[i] == '/') {
++        i++;
++    }
++    size_t name = i;
++    while ((p[i] >= 'a' && p[i] <= 'z') || p[i] == '-') {
++        if (++i - name > 24) {
++            return 0;
++        }
++    }
++    return i > name && p[i] == close ? i + 1 : 0;
++}
++
++size_t muse_hatch_strip_tags(const char *in, char *out, size_t cap, size_t *at)
++{
++    size_t o = 0, i = 0, at_in = at ? *at : 0;
++    bool moved = false;
++    while (in[i] && o + 1 < cap) {
++        if (at && !moved && i >= at_in) {
++            *at = o;
++            moved = true;
++        }
++        size_t t = muse_hatch_tag_len(in + i);
++        if (t) {
++            i += t;
++            /* "word [laugh] word" leaves one space, not two. */
++            if (in[i] == ' ' && (!o || out[o - 1] == ' ' || out[o - 1] == '\n')) {
++                i++;
++            }
++            continue;
++        }
++        out[o++] = in[i++];
++    }
++    if (at && !moved) {
++        *at = o ? o - 1 : 0;
++    }
++    out[o] = '\0';
++    return o;
++}
++
+ /*
+  * Wraps `text` to the screen's page (muse_state_page) and puts the page holding
+  * byte `at` in `out`. Pages overlap by a line: a page's last line starts the
+  * next one, so the page turns as that line is reached and nothing is skipped.
++ * Speech tags are left out, and `at` moved to match.
+  */
+ bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap)
+ {
++    size_t text_len = strlen(text);
++    char *clean = heap_caps_malloc(text_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (clean) {
++        muse_hatch_strip_tags(text, clean, text_len + 1, &at);
++        text = clean;
++    }
+     int cols, lines;
+     muse_state_page(muse_text_has_cjk(text), &cols, &lines);
+     const char *p = text, *start;
+@@ -164,6 +222,7 @@ bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap)
+         }
+     }
+     if (line < 0) {
++        free(clean);
+         return false;
+     }
+     int first = lines > 1 ? line / (lines - 1) * (lines - 1) : line;
+@@ -180,6 +239,7 @@ bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap)
+         }
+         o += snprintf(out + o, cap - o, "%s%.*s", o ? "\n" : "", (int)len, start);
+     }
++    free(clean);
+     return true;
+ }
+ 
 diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
 new file mode 100644
-index 0000000..6f63da2
+index 0000000..3bc7547
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.c
-@@ -0,0 +1,812 @@
+@@ -0,0 +1,847 @@
 +#include "muse_gemini_tts.h"
 +
 +#include <stdatomic.h>
@@ -1989,6 +2301,7 @@ index 0000000..6f63da2
 +#include <strings.h>
 +
 +#include "cJSON.h"
++#include "esp_attr.h"
 +#include "esp_crt_bundle.h"
 +#include "esp_heap_caps.h"
 +#include "esp_log.h"
@@ -2000,6 +2313,7 @@ index 0000000..6f63da2
 +#include "lwip/sockets.h"
 +#include "mbedtls/base64.h"
 +#include "muse_wifi.h"
++#include "muse_xai_tts.h"
 +#include "nvs.h"
 +
 +static const char *TAG = "muse_gemini_tts";
@@ -2052,7 +2366,8 @@ index 0000000..6f63da2
 +static int s_sentence;                       /* sentences spoken in the current reply */
 +static uint32_t s_rs_gen;                    /* the reply the resampler state belongs to */
 +
-+static struct {
++/* In PSRAM: internal RAM is short, and the worker only reads it a byte at a time. */
++EXT_RAM_BSS_ATTR static struct {
 +    uint8_t buf[RX_BUF];
 +    size_t pos, len;
 +} s_rx;
@@ -2110,6 +2425,9 @@ index 0000000..6f63da2
 +
 +bool muse_gemini_tts_configured(void)
 +{
++    if (muse_xai_tts_configured()) {
++        return true;
++    }
 +    load_key();
 +    return s_key[0] != '\0';
 +}
@@ -2720,6 +3038,13 @@ index 0000000..6f63da2
 +
 +/* --- API ------------------------------------------------------------------------------ */
 +
++/*
++ * With an xAI key stored, replies go to muse_xai_tts.c instead: no daily
++ * quota there. Picked per reply at begin(), so a key set mid-reply doesn't
++ * split one.
++ */
++static bool s_xai;
++
 +static bool ensure_worker(void)
 +{
 +    if (s_task) {
@@ -2739,6 +3064,10 @@ index 0000000..6f63da2
 +
 +void muse_gemini_tts_warm(void)
 +{
++    if (muse_xai_tts_configured()) {
++        muse_xai_tts_warm();
++        return;
++    }
 +    if (!muse_gemini_tts_configured() || !ensure_worker()) {
 +        return;
 +    }
@@ -2748,6 +3077,10 @@ index 0000000..6f63da2
 +
 +bool muse_gemini_tts_begin(StreamBufferHandle_t out)
 +{
++    s_xai = muse_xai_tts_configured();
++    if (s_xai) {
++        return muse_xai_tts_begin(out);
++    }
 +    if (!muse_gemini_tts_configured() || !ensure_worker()) {
 +        return false;
 +    }
@@ -2760,6 +3093,9 @@ index 0000000..6f63da2
 +
 +bool muse_gemini_tts_say(const char *text, size_t len)
 +{
++    if (s_xai) {
++        return muse_xai_tts_say(text, len);
++    }
 +    char *copy = malloc(len + 1);
 +    if (!copy) {
 +        return false;
@@ -2776,6 +3112,10 @@ index 0000000..6f63da2
 +
 +void muse_gemini_tts_end(void)
 +{
++    if (s_xai) {
++        muse_xai_tts_end();
++        return;
++    }
 +    job_t job = { .type = JOB_END, .gen = atomic_load(&s_gen) };
 +    if (xQueueSend(s_queue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
 +        atomic_store(&s_state, atomic_load(&s_audio_bytes) ? MUSE_GEMINI_TTS_DONE : MUSE_GEMINI_TTS_FAILED);
@@ -2784,11 +3124,18 @@ index 0000000..6f63da2
 +
 +muse_gemini_tts_state_t muse_gemini_tts_state(void)
 +{
++    if (s_xai) {
++        return muse_xai_tts_state();
++    }
 +    return (muse_gemini_tts_state_t)atomic_load(&s_state);
 +}
 +
 +void muse_gemini_tts_cancel(void)
 +{
++    if (s_xai) {
++        muse_xai_tts_cancel();
++        return;
++    }
 +    atomic_fetch_add(&s_gen, 1);
 +    atomic_store(&s_state, MUSE_GEMINI_TTS_IDLE);
 +}
@@ -3004,10 +3351,19 @@ index 5a60abf..7e47c61 100644
          } else {
              vTaskDelay(pdMS_TO_TICKS(paused ? REST_POLL_MS : POLL_MS));
 diff --git a/esp32/components/muse/muse_pixel.h b/esp32/components/muse/muse_pixel.h
-index fe603d8..cbb524e 100644
+index fe603d8..6e8c2ec 100644
 --- a/esp32/components/muse/muse_pixel.h
 +++ b/esp32/components/muse/muse_pixel.h
-@@ -55,3 +55,12 @@ void muse_pixel_set_size(int px);
+@@ -38,6 +38,8 @@ typedef struct {
+     float mode_t;    /* seconds in current mode */
+     float level;     /* 0..1 live audio level */
+     float happy;     /* 0..1 pet reaction */
++    muse_reaction_t reaction;   /* a face Muse asked for in its reply */
++    float reaction_t;           /* seconds since it was asked for */
+ } muse_pose_t;
+ 
+ /* Accent colour of a mode (for the surrounding UI), as 0xRRGGBB. */
+@@ -55,3 +57,12 @@ void muse_pixel_set_size(int px);
   * image never has to exist in RAM.
   */
  void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1);
@@ -3190,8 +3546,54 @@ index 6a372ac..571658d 100644
  }
  
  /* ---------- Battery ---------- */
+diff --git a/esp32/components/muse/muse_state.c b/esp32/components/muse/muse_state.c
+index 27377e2..e2dd36d 100644
+--- a/esp32/components/muse/muse_state.c
++++ b/esp32/components/muse/muse_state.c
+@@ -38,6 +38,8 @@ static volatile float s_level;
+ static volatile float s_progress;
+ static volatile int64_t s_last_poke_us;
+ static volatile int64_t s_happy_until_us;
++static volatile muse_reaction_t s_reaction;
++static volatile int64_t s_reaction_us;
+ static volatile bool s_asleep;
+ 
+ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+@@ -78,6 +80,9 @@ void muse_state_set_mode(muse_mode_t mode)
+     }
+     s_mode_since_us = esp_timer_get_time();
+     s_mode = mode;
++    if (mode != MUSE_MODE_THINKING && mode != MUSE_MODE_SPEAKING) {
++        s_reaction = MUSE_REACT_NONE;   /* a reply's faces end with it */
++    }
+ }
+ 
+ muse_mode_t muse_state_mode(float *secs_in_mode)
+@@ -231,6 +236,22 @@ void muse_state_nudge(void)
+     xEventGroupSetBits(s_wake, NUDGE_BIT);
+ }
+ 
++void muse_state_react(muse_reaction_t reaction)
++{
++    s_reaction_us = esp_timer_get_time();
++    s_reaction = reaction;
++    muse_state_poke();
++}
++
++muse_reaction_t muse_state_reaction(float *secs)
++{
++    muse_reaction_t r = s_reaction;
++    if (secs) {
++        *secs = r ? (float)(esp_timer_get_time() - s_reaction_us) / 1e6f : 0;
++    }
++    return r;
++}
++
+ void muse_state_make_happy(void)
+ {
+     s_happy_until_us = esp_timer_get_time() + (int64_t)(HAPPY_SECS * 1e6f);
 diff --git a/esp32/components/muse/muse_state.h b/esp32/components/muse/muse_state.h
-index ecea3fe..bb12c8c 100644
+index ecea3fe..b722619 100644
 --- a/esp32/components/muse/muse_state.h
 +++ b/esp32/components/muse/muse_state.h
 @@ -58,6 +58,9 @@ float muse_state_progress(void);
@@ -3204,8 +3606,25 @@ index ecea3fe..bb12c8c 100644
  
  void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  /* Copies the caption if it changed since *version; returns true on change. */
+@@ -95,3 +98,16 @@ void muse_state_nudge(void);
+ /* Touch/pet reaction. */
+ void muse_state_make_happy(void);
+ float muse_state_happiness(void);
++
++/* A face Muse asks for in its reply ("[face-joy]"), played over the speaking
++ * one. It lasts until the next turn starts or the reply is over. */
++typedef enum {
++    MUSE_REACT_NONE,
++    MUSE_REACT_JOY,
++    MUSE_REACT_THINKING,
++    MUSE_REACT_SAD,
++    MUSE_REACT_GOODNIGHT,
++} muse_reaction_t;
++void muse_state_react(muse_reaction_t reaction);
++/* The face asked for, and how long ago (secs may be NULL). */
++muse_reaction_t muse_state_reaction(float *secs);
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..92e1d2d 100644
+index d0d4e2f..daf7d2e 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -3732,7 +4151,7 @@ index d0d4e2f..92e1d2d 100644
 +        float ux = tx / len, uy = ty / len;   /* outwards, towards the button */
 +        float reach = (s_w < s_h ? s_w : s_h) / 2 - 33;   /* the tip, 33 px in from the rim */
 +        float tipx = s_w / 2 + ux * reach, tipy = s_h / 2 + uy * reach;
-+        float tailx = tipx - ux * 76, taily = tipy - uy * 76;
++        float tailx = tipx - ux * 46, taily = tipy - uy * 46;   /* a 46 px shaft */
 +        shaft[0] = (lv_point_precise_t){ tailx, taily };
 +        shaft[1] = (lv_point_precise_t){ tipx, tipy };
 +        float c = cosf(0.6f), s = sinf(0.6f);   /* the head's strokes, 34 degrees off the shaft */
@@ -3919,6 +4338,23 @@ index d0d4e2f..92e1d2d 100644
      update_power(now);
  }
  
+@@ -1644,12 +1993,16 @@ static void frame_tick(lv_timer_t *timer)
+     float level = muse_state_level();
+     s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
+ 
++    float reaction_t;
++    muse_reaction_t reaction = muse_state_reaction(&reaction_t);
+     muse_pose_t pose = {
+         .mode = mode,
+         .t = now,
+         .mode_t = mode_t,
+         .level = s_level,
+         .happy = muse_state_happiness(),
++        .reaction = reaction,
++        .reaction_t = reaction_t,
+     };
+     muse_pixel_render(&pose);
+     invalidate_muse();
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
 index 38c7c9d..8767c26 100644
 --- a/esp32/components/muse/muse_voice.c
@@ -4018,11 +4454,957 @@ index 38c7c9d..8767c26 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
+diff --git a/esp32/components/muse/muse_xai_tts.c b/esp32/components/muse/muse_xai_tts.c
+new file mode 100644
+index 0000000..ddddeaa
+--- /dev/null
++++ b/esp32/components/muse/muse_xai_tts.c
+@@ -0,0 +1,880 @@
++#include "muse_xai_tts.h"
++
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++#include "cJSON.h"
++#include "esp_attr.h"
++#include "esp_crt_bundle.h"
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "esp_random.h"
++#include "esp_timer.h"
++#include "esp_tls.h"
++#include "freertos/idf_additions.h"
++#include "freertos/queue.h"
++#include "freertos/task.h"
++#include "lwip/sockets.h"
++#include "mbedtls/base64.h"
++#include "muse_wifi.h"
++#include "nvs.h"
++
++static const char *TAG = "muse_xai_tts";
++
++#define HOST "api.x.ai"
++/* language=auto: Muse may answer in any language. Level 1 trades a little quality for an earlier first chunk. */
++#define PATH "/v1/tts?language=auto&voice=" VOICE "&codec=pcm&sample_rate=16000&optimize_streaming_latency=1"
++#define VOICE "iris"                     /* an unknown voice is refused at the upgrade, HTTP 400 */
++#define NVS_NS "muse_tts"                /* shared with the Gemini key */
++#define NVS_KEY "xai_key"
++#define COMMAND "xai_key="
++#define KEY_MAX 160
++#define MSG_MAX (256 * 1024)             /* one server message; its base64 audio grows it */
++#define RX_BUF 4096
++#define HDR_LINE_MAX 1024
++#define ERR_MAX 400
++#define SEND_WAIT_MS 50                  /* blocked on a full reply buffer, look for cancel this often */
++#define POLL_MS 5                        /* a reply is in flight: check the socket this often */
++#define IO_TIMEOUT_US (20 * 1000000LL)   /* waiting on audio with nothing from the server this long: give up */
++#define CONNECT_TIMEOUT_MS 10000
++#define IDLE_CLOSE_US (60 * 1000000LL)   /* an unused connection is closed after this */
++#define STALE_US (45 * 1000000LL)        /* idle longer than this: reconnect rather than trust it */
++#define QUEUE_LEN 24
++#define STACK (10 * 1024)
++#define WARM_WIFI_WAIT_MS 10000         /* waking from a nap, Wi-Fi takes a few seconds to rejoin */
++
++/* WebSocket opcodes (RFC 6455). */
++#define WS_CONT 0x0
++#define WS_TEXT 0x1
++#define WS_BINARY 0x2
++#define WS_CLOSE 0x8
++#define WS_PING 0x9
++#define WS_PONG 0xA
++
++/* --- shared state (any task) -------------------------------------------------- */
++
++static char s_key[KEY_MAX];
++static bool s_key_loaded;
++static _Atomic int s_state = MUSE_GEMINI_TTS_IDLE;
++static _Atomic uint32_t s_gen;           /* the reply being spoken; bumped by begin and cancel */
++static _Atomic uint32_t s_audio_bytes;   /* PCM handed out for the current reply */
++static StreamBufferHandle_t s_out;       /* set by begin, read by the worker */
++static QueueHandle_t s_queue;
++static TaskHandle_t s_task;
++
++typedef enum { JOB_WARM, JOB_SAY, JOB_END } job_type_t;
++
++typedef struct {
++    job_type_t type;
++    uint32_t gen;
++    char *text;                          /* JOB_SAY, owned by the job */
++} job_t;
++
++/* --- worker-only state ---------------------------------------------------------- */
++
++static esp_tls_t *s_tls;
++static esp_tls_client_session_t *s_ticket;   /* resumes the TLS session on reconnect */
++static int64_t s_last_use_us;
++static uint32_t s_failed_gen;                /* a reply whose key or request was refused: skip the rest */
++
++/* In PSRAM, like the rest of this client's buffers: internal RAM is what Wi-Fi and TLS run short of. */
++EXT_RAM_BSS_ATTR static struct {
++    uint8_t buf[RX_BUF];
++    size_t pos, len;
++} s_rx;
++
++/* Incoming frames, a byte at a time, so reading never has to block. */
++EXT_RAM_BSS_ATTR static struct {
++    enum { F_HDR0, F_HDR1, F_EXTLEN, F_MASK, F_PAYLOAD } st;
++    uint8_t op, msg_op;
++    bool fin, masked;
++    uint8_t ext_need, ext_got, mask[4], mask_got;
++    uint64_t len, got;
++    uint8_t ctl[125];                        /* a control frame's payload */
++    bool overflow;                           /* the message outgrew MSG_MAX */
++} f;
++
++static char *s_msg;                          /* MSG_MAX: a whole text message */
++static size_t s_msg_len;
++
++static void feed(const uint8_t *buf, size_t n);
++
++/* The reply in flight. */
++static struct {
++    uint32_t gen;
++    bool active;                             /* text has gone out for it */
++    bool ending;                             /* text.done sent: waiting on audio.done */
++    bool refused;                            /* an error event, or the upgrade refused */
++    bool reused;                             /* it went out on a kept connection */
++    int sentences;
++    size_t chars;
++    int64_t t0, first_audio_us, last_rx_us;
++    size_t pcm_bytes;
++    uint8_t odd;
++    bool have_odd;
++} r;
++
++static inline int64_t now_us(void)
++{
++    return esp_timer_get_time();
++}
++
++static inline bool cancelled(void)
++{
++    return atomic_load(&s_gen) != r.gen;
++}
++
++/* --- key ------------------------------------------------------------------------ */
++
++static void load_key(void)
++{
++    if (s_key_loaded) {
++        return;
++    }
++    s_key_loaded = true;
++    s_key[0] = '\0';
++    nvs_handle_t h;
++    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
++        return;
++    }
++    size_t len = sizeof(s_key);
++    if (nvs_get_str(h, NVS_KEY, s_key, &len) != ESP_OK) {
++        s_key[0] = '\0';
++    }
++    nvs_close(h);
++}
++
++bool muse_xai_tts_configured(void)
++{
++    load_key();
++    return s_key[0] != '\0';
++}
++
++static bool key_valid(const char *k)
++{
++    size_t n = strlen(k);
++    if (n < 20 || n >= KEY_MAX) {
++        return false;
++    }
++    for (size_t i = 0; i < n; i++) {
++        char c = k[i];
++        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
++              c == '.')) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool muse_xai_tts_console_command(const char *line)
++{
++    if (strncmp(line, COMMAND, strlen(COMMAND)) != 0) {
++        return false;
++    }
++    const char *key = line + strlen(COMMAND);
++    if (key[0] && !key_valid(key)) {
++        printf("@xai_key error invalid\n");
++        fflush(stdout);
++        return true;
++    }
++    nvs_handle_t h;
++    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
++    if (err == ESP_OK) {
++        err = key[0] ? nvs_set_str(h, NVS_KEY, key) : nvs_erase_key(h, NVS_KEY);
++        if (err == ESP_ERR_NVS_NOT_FOUND) {
++            err = ESP_OK;   /* clearing a key that wasn't there */
++        }
++        if (err == ESP_OK) {
++            err = nvs_commit(h);
++        }
++        nvs_close(h);
++    }
++    if (err != ESP_OK) {
++        ESP_LOGE(TAG, "couldn't store the key: %s", esp_err_to_name(err));
++        printf("@xai_key error storage\n");
++        fflush(stdout);
++        return true;
++    }
++    strlcpy(s_key, key, sizeof(s_key));
++    s_key_loaded = true;
++    /* Never log the key itself. */
++    ESP_LOGI(TAG, "%s", key[0] ? "xAI key stored; replies will be spoken by xAI" : "xAI key cleared; replies go back to Gemini");
++    printf(key[0] ? "@xai_key ok\n" : "@xai_key cleared\n");
++    fflush(stdout);
++    return true;
++}
++
++/* --- connection ------------------------------------------------------------------ */
++
++static void conn_close(void)
++{
++    if (s_tls) {
++        esp_tls_conn_destroy(s_tls);
++        s_tls = NULL;
++    }
++    s_rx.pos = s_rx.len = 0;
++    f.st = F_HDR0;
++    s_msg_len = 0;
++}
++
++static bool conn_write(const uint8_t *data, size_t len)
++{
++    int64_t deadline = now_us() + IO_TIMEOUT_US;
++    while (len) {
++        ssize_t n = esp_tls_conn_write(s_tls, data, len);
++        if (n > 0) {
++            data += n;
++            len -= n;
++        } else if (n == ESP_TLS_ERR_SSL_WANT_READ || n == ESP_TLS_ERR_SSL_WANT_WRITE) {
++            if (now_us() > deadline) {
++                return false;
++            }
++            vTaskDelay(1);
++        } else {
++            return false;
++        }
++    }
++    return true;
++}
++
++/* Next byte, waiting for it: 1 ok, 0 closed, -1 error or timeout. Only for the upgrade response. */
++static int rx_byte_wait(uint8_t *c)
++{
++    if (s_rx.pos < s_rx.len) {
++        *c = s_rx.buf[s_rx.pos++];
++        return 1;
++    }
++    int64_t deadline = now_us() + IO_TIMEOUT_US;
++    for (;;) {
++        ssize_t n = esp_tls_conn_read(s_tls, s_rx.buf, sizeof(s_rx.buf));
++        if (n > 0) {
++            s_rx.pos = 0;
++            s_rx.len = n;
++            *c = s_rx.buf[s_rx.pos++];
++            return 1;
++        }
++        if (n == 0) {
++            return 0;
++        }
++        if (n != ESP_TLS_ERR_SSL_WANT_READ && n != ESP_TLS_ERR_SSL_WANT_WRITE) {
++            return -1;
++        }
++        if (now_us() > deadline) {
++            return -1;
++        }
++        vTaskDelay(pdMS_TO_TICKS(5));
++    }
++}
++
++static bool rx_line(char *out, size_t cap)
++{
++    size_t n = 0;
++    for (;;) {
++        uint8_t c;
++        if (rx_byte_wait(&c) != 1) {
++            return false;
++        }
++        if (c == '\n') {
++            break;
++        }
++        if (c != '\r') {
++            if (n + 1 >= cap) {
++                return false;
++            }
++            out[n++] = (char)c;
++        }
++    }
++    out[n] = '\0';
++    return true;
++}
++
++/* One client frame: always FIN, always masked (RFC 6455 5.3), sent in pieces so nothing big is allocated. */
++static bool ws_send(uint8_t op, const void *data, size_t len)
++{
++    uint8_t hdr[14];
++    size_t hl = 0;
++    hdr[hl++] = 0x80 | op;
++    if (len < 126) {
++        hdr[hl++] = 0x80 | (uint8_t)len;
++    } else if (len <= 0xffff) {
++        hdr[hl++] = 0x80 | 126;
++        hdr[hl++] = (uint8_t)(len >> 8);
++        hdr[hl++] = (uint8_t)len;
++    } else {
++        hdr[hl++] = 0x80 | 127;
++        for (int i = 7; i >= 0; i--) {
++            hdr[hl++] = (uint8_t)((uint64_t)len >> (8 * i));
++        }
++    }
++    uint8_t mask[4];
++    esp_fill_random(mask, sizeof(mask));
++    memcpy(hdr + hl, mask, 4);
++    hl += 4;
++    if (!conn_write(hdr, hl)) {
++        return false;
++    }
++    const uint8_t *p = data;
++    uint8_t chunk[256];
++    for (size_t off = 0; off < len;) {
++        size_t n = len - off < sizeof(chunk) ? len - off : sizeof(chunk);
++        for (size_t i = 0; i < n; i++) {
++            chunk[i] = p[off + i] ^ mask[(off + i) & 3];
++        }
++        if (!conn_write(chunk, n)) {
++            return false;
++        }
++        off += n;
++    }
++    return true;
++}
++
++static bool ws_send_text(const char *s)
++{
++    if (!s_tls || !ws_send(WS_TEXT, s, strlen(s))) {
++        ESP_LOGW(TAG, "sending to xAI failed");
++        conn_close();
++        return false;
++    }
++    s_last_use_us = now_us();
++    return true;
++}
++
++/*
++ * Opens the TLS connection, resuming the last session when it can, and
++ * upgrades it to a WebSocket. A refused upgrade (bad key, voice or quota)
++ * comes back as an ordinary HTTP response, whose body says why. The server's
++ * Sec-WebSocket-Accept isn't checked: TLS already says who answered.
++ */
++static bool conn_open(void)
++{
++    conn_close();
++    int64_t t0 = now_us();
++    s_tls = esp_tls_init();
++    if (!s_tls) {
++        return false;
++    }
++    esp_tls_cfg_t cfg = {
++        .crt_bundle_attach = esp_crt_bundle_attach,
++        .timeout_ms = CONNECT_TIMEOUT_MS,
++#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
++        .client_session = s_ticket,
++#endif
++    };
++    if (esp_tls_conn_new_sync(HOST, strlen(HOST), 443, &cfg, s_tls) != 1) {
++        ESP_LOGW(TAG, "can't reach the xAI API");
++#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
++        if (s_ticket) {
++            /* The ticket may be what was refused: the next try starts afresh. */
++            esp_tls_free_client_session(s_ticket);
++            s_ticket = NULL;
++        }
++#endif
++        conn_close();
++        return false;
++    }
++    bool resumed = s_ticket != NULL;
++#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
++    if (s_ticket) {
++        esp_tls_free_client_session(s_ticket);
++    }
++    s_ticket = esp_tls_get_client_session(s_tls);
++#endif
++    int fd;
++    if (esp_tls_get_conn_sockfd(s_tls, &fd) == ESP_OK) {
++        lwip_fcntl(fd, F_SETFL, lwip_fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
++    }
++
++    uint8_t nonce[16];
++    esp_fill_random(nonce, sizeof(nonce));
++    unsigned char ws_key[32];
++    size_t ws_key_len = 0;
++    mbedtls_base64_encode(ws_key, sizeof(ws_key), &ws_key_len, nonce, sizeof(nonce));
++    ws_key[ws_key_len] = '\0';
++    char head[640];
++    int hl = snprintf(head, sizeof(head),
++                      "GET " PATH " HTTP/1.1\r\n"
++                      "Host: " HOST "\r\n"
++                      "Upgrade: websocket\r\n"
++                      "Connection: Upgrade\r\n"
++                      "Sec-WebSocket-Key: %s\r\n"
++                      "Sec-WebSocket-Version: 13\r\n"
++                      "Authorization: Bearer %s\r\n\r\n",
++                      (const char *)ws_key, s_key);
++    bool sent = hl > 0 && hl < (int)sizeof(head) && conn_write((const uint8_t *)head, hl);
++    memset(head, 0, sizeof(head));   /* it held the key */
++    char line[HDR_LINE_MAX];
++    int status = 0;
++    if (!sent || !rx_line(line, sizeof(line)) || sscanf(line, "HTTP/%*s %d", &status) != 1) {
++        ESP_LOGW(TAG, "no WebSocket upgrade from the xAI API");
++        conn_close();
++        return false;
++    }
++    long length = 0;
++    for (;;) {
++        if (!rx_line(line, sizeof(line))) {
++            conn_close();
++            return false;
++        }
++        if (!line[0]) {
++            break;
++        }
++        if (!strncasecmp(line, "content-length:", 15)) {
++            length = strtol(line + 15, NULL, 10);
++        }
++    }
++    if (status != 101) {
++        /* The error body says why (bad key, quota, voice); it never holds the key. */
++        char err[ERR_MAX];
++        size_t n = 0;
++        uint8_t c;
++        for (long i = 0; i < length && n < sizeof(err) - 1 && rx_byte_wait(&c) == 1; i++) {
++            err[n++] = (char)c;
++        }
++        err[n] = '\0';
++        ESP_LOGW(TAG, "HTTP %d: %.300s", status, err);
++        r.refused = status >= 400 && status < 500;
++        conn_close();
++        return false;
++    }
++    f.st = F_HDR0;
++    s_msg_len = 0;
++    s_last_use_us = now_us();
++    ESP_LOGI(TAG, "connected in %d ms%s", (int)((now_us() - t0) / 1000), resumed ? " (resumed session)" : "");
++    /* Frames that came in the same read as the upgrade response. */
++    size_t left = s_rx.len - s_rx.pos;
++    size_t from = s_rx.pos;
++    s_rx.pos = s_rx.len = 0;
++    if (left) {
++        feed(s_rx.buf + from, left);
++    }
++    return s_tls != NULL;
++}
++
++/* A connection that's open and not so old the server may have dropped it. */
++static bool conn_fresh(void)
++{
++    return s_tls && now_us() - s_last_use_us < STALE_US;
++}
++
++/* --- audio ------------------------------------------------------------------------- */
++
++static void put_pcm(const uint8_t *pcm, size_t n)
++{
++    if (!r.first_audio_us) {
++        r.first_audio_us = now_us();
++    }
++    while (n && !cancelled()) {
++        size_t sent = xStreamBufferSend(s_out, pcm, n, pdMS_TO_TICKS(SEND_WAIT_MS));
++        pcm += sent;
++        n -= sent;
++        r.pcm_bytes += sent;
++        atomic_fetch_add(&s_audio_bytes, sent);
++    }
++}
++
++/* Already at the speaker's rate: only a byte left over from the last chunk has to be carried. */
++static void put_audio(const uint8_t *bytes, size_t len)
++{
++    if (!len) {
++        return;
++    }
++    if (r.have_odd) {
++        uint8_t pair[2] = { r.odd, bytes[0] };
++        put_pcm(pair, 2);
++        bytes++;
++        len--;
++        r.have_odd = false;
++    }
++    if (len & 1) {
++        r.odd = bytes[len - 1];
++        r.have_odd = true;
++        len--;
++    }
++    put_pcm(bytes, len);
++}
++
++static void put_base64(const char *b64)
++{
++    size_t in = strlen(b64);
++    if (!in) {
++        return;
++    }
++    size_t cap = in / 4 * 3 + 3;
++    uint8_t *pcm = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!pcm) {
++        ESP_LOGW(TAG, "no memory for %u bytes of audio", (unsigned)cap);
++        return;
++    }
++    size_t out = 0;
++    if (mbedtls_base64_decode(pcm, cap, &out, (const unsigned char *)b64, in) == 0) {
++        put_audio(pcm, out);
++    } else {
++        ESP_LOGW(TAG, "bad base64 audio");
++    }
++    free(pcm);
++}
++
++/* --- reply ------------------------------------------------------------------------- */
++
++static void finish(const char *why)
++{
++    if (!r.active) {
++        return;
++    }
++    /* Cut off before end(): the end job settles the state, and later sentences start a new utterance. */
++    bool ended = r.ending;
++    r.active = r.ending = false;
++    if (r.refused) {
++        s_failed_gen = r.gen;   /* the key or request was refused: the rest would be too */
++    }
++    if (ended && r.gen == atomic_load(&s_gen)) {
++        atomic_store(&s_state, atomic_load(&s_audio_bytes) ? MUSE_GEMINI_TTS_DONE : MUSE_GEMINI_TTS_FAILED);
++    }
++    ESP_LOGI(TAG, "reply (%d sentences, %u chars, %s): first audio %d ms, %.2fs of speech in %.2fs%s%s%s", r.sentences,
++             (unsigned)r.chars, r.reused ? "kept connection" : "new connection",
++             r.first_audio_us ? (int)((r.first_audio_us - r.t0) / 1000) : -1,
++             (double)r.pcm_bytes / 2 / MUSE_GEMINI_TTS_RATE, (now_us() - r.t0) / 1e6, why ? " (" : "",
++             why ? why : "", why ? ")" : "");
++}
++
++static void on_message(char *json)
++{
++    cJSON *ev = cJSON_Parse(json);
++    if (!ev) {
++        ESP_LOGW(TAG, "unparsable message (%u bytes)", (unsigned)strlen(json));
++        return;
++    }
++    const cJSON *type = cJSON_GetObjectItemCaseSensitive(ev, "type");
++    const char *t = cJSON_IsString(type) ? type->valuestring : "";
++    if (!strcmp(t, "audio.delta")) {
++        const cJSON *delta = cJSON_GetObjectItemCaseSensitive(ev, "delta");
++        if (r.active && !cancelled() && cJSON_IsString(delta)) {
++            put_base64(delta->valuestring);
++        }
++    } else if (!strcmp(t, "audio.done")) {
++        if (r.ending) {
++            finish(NULL);
++        }
++    } else if (!strcmp(t, "error")) {
++        const cJSON *msg = cJSON_GetObjectItemCaseSensitive(ev, "message");
++        ESP_LOGW(TAG, "API error: %s", cJSON_IsString(msg) ? msg->valuestring : "(no message)");
++        r.refused = true;
++        if (r.active) {
++            /* The utterance is over as far as the server goes; don't wait for an audio.done. */
++            finish("failed");
++        }
++    }
++    cJSON_Delete(ev);
++}
++
++static void on_frame(void)
++{
++    switch (f.op) {
++    case WS_PING:
++        ws_send(WS_PONG, f.ctl, f.len < sizeof(f.ctl) ? (size_t)f.len : sizeof(f.ctl));
++        return;
++    case WS_PONG:
++        return;
++    case WS_CLOSE:
++        ESP_LOGI(TAG, "the xAI API closed the connection");
++        conn_close();
++        finish("connection closed");
++        return;
++    case WS_TEXT:
++    case WS_BINARY:
++        f.msg_op = f.op;
++        break;
++    case WS_CONT:
++        break;
++    default:
++        return;
++    }
++    if (!f.fin) {
++        return;
++    }
++    if (f.overflow) {
++        ESP_LOGW(TAG, "message over %u bytes dropped", (unsigned)MSG_MAX);
++    } else if (f.msg_op == WS_TEXT) {
++        s_msg[s_msg_len] = '\0';
++        on_message(s_msg);
++    }
++    s_msg_len = 0;
++    f.overflow = false;
++}
++
++static void payload_byte(uint8_t c)
++{
++    if (f.masked) {
++        c ^= f.mask[f.got & 3];
++    }
++    if (f.op >= WS_CLOSE) {
++        if (f.got < sizeof(f.ctl)) {
++            f.ctl[f.got] = c;
++        }
++    } else if (s_msg_len < MSG_MAX - 1) {
++        s_msg[s_msg_len++] = (char)c;
++    } else {
++        f.overflow = true;
++    }
++    f.got++;
++}
++
++/* Feeds received bytes through the frame parser; whole frames are handled as they complete. */
++static void feed(const uint8_t *buf, size_t n)
++{
++    for (size_t i = 0; i < n && s_tls; i++) {
++        uint8_t c = buf[i];
++        switch (f.st) {
++        case F_HDR0:
++            f.fin = c & 0x80;
++            f.op = c & 0x0f;
++            f.st = F_HDR1;
++            break;
++        case F_HDR1:
++            f.masked = c & 0x80;
++            f.len = c & 0x7f;
++            f.got = 0;
++            f.mask_got = 0;
++            if (f.len >= 126) {
++                f.ext_need = f.len == 126 ? 2 : 8;
++                f.ext_got = 0;
++                f.len = 0;
++                f.st = F_EXTLEN;
++            } else {
++                f.st = f.masked ? F_MASK : F_PAYLOAD;
++            }
++            break;
++        case F_EXTLEN:
++            f.len = f.len << 8 | c;
++            if (++f.ext_got == f.ext_need) {
++                f.st = f.masked ? F_MASK : F_PAYLOAD;
++            }
++            break;
++        case F_MASK:
++            f.mask[f.mask_got++] = c;
++            if (f.mask_got == 4) {
++                f.st = F_PAYLOAD;
++            }
++            break;
++        case F_PAYLOAD:
++            payload_byte(c);
++            break;
++        }
++        if (f.st == F_PAYLOAD && f.got == f.len) {
++            f.st = F_HDR0;
++            on_frame();
++        }
++    }
++}
++
++/* Reads whatever has arrived, without waiting. False if the connection failed. */
++static bool poll_rx(void)
++{
++    while (s_tls) {
++        ssize_t n = esp_tls_conn_read(s_tls, s_rx.buf, sizeof(s_rx.buf));
++        if (n > 0) {
++            r.last_rx_us = s_last_use_us = now_us();
++            feed(s_rx.buf, n);
++            continue;
++        }
++        if (n == ESP_TLS_ERR_SSL_WANT_READ || n == ESP_TLS_ERR_SSL_WANT_WRITE) {
++            return true;
++        }
++        ESP_LOGW(TAG, "the connection to xAI dropped");
++        conn_close();
++        return false;
++    }
++    return false;
++}
++
++/* Streams one sentence into the reply's utterance, connecting first if need be. */
++static void say(uint32_t gen, const char *text)
++{
++    if (!r.active || r.gen != gen) {
++        memset(&r, 0, sizeof(r));
++        r.gen = gen;
++        r.t0 = now_us();
++        r.reused = conn_fresh();
++        if (!r.reused && !conn_open()) {
++            if (r.refused) {
++                s_failed_gen = gen;
++            }
++            return;
++        }
++        r.active = true;
++    }
++    r.sentences++;
++    r.chars += strlen(text);
++    /* What the voice is given, speech tags and all: the screen shows it without them. */
++    ESP_LOGI(TAG, "piece %d: \"%.200s\"", r.sentences, text);
++    r.last_rx_us = now_us();
++    cJSON *msg = cJSON_CreateObject();
++    cJSON_AddStringToObject(msg, "type", "text.delta");
++    /* Sentences come without the space between them. */
++    size_t n = strlen(text);
++    char *spaced = malloc(n + 2);
++    if (!msg || !spaced) {
++        cJSON_Delete(msg);
++        free(spaced);
++        return;
++    }
++    memcpy(spaced, text, n);
++    spaced[n] = ' ';
++    spaced[n + 1] = '\0';
++    cJSON_AddStringToObject(msg, "delta", spaced);
++    free(spaced);
++    char *json = cJSON_PrintUnformatted(msg);
++    cJSON_Delete(msg);
++    if (!json || !ws_send_text(json)) {
++        finish("send failed");
++    }
++    cJSON_free(json);
++}
++
++static void end_reply(uint32_t gen)
++{
++    if (r.active && r.gen == gen && s_tls) {
++        if (ws_send_text("{\"type\":\"text.done\"}")) {
++            r.ending = true;
++            r.last_rx_us = now_us();
++            return;
++        }
++        finish("send failed");
++        return;
++    }
++    if (gen == atomic_load(&s_gen)) {
++        atomic_store(&s_state, atomic_load(&s_audio_bytes) ? MUSE_GEMINI_TTS_DONE : MUSE_GEMINI_TTS_FAILED);
++    }
++}
++
++static void worker(void *arg)
++{
++    (void)arg;
++    for (;;) {
++        TickType_t wait = r.active ? pdMS_TO_TICKS(POLL_MS) : s_tls ? pdMS_TO_TICKS(1000) : portMAX_DELAY;
++        job_t job;
++        bool got = xQueueReceive(s_queue, &job, wait) == pdTRUE;
++
++        if (r.active && cancelled()) {
++            /* Closing is the quickest way to stop the audio still coming. */
++            conn_close();
++            finish("cancelled");
++        }
++        if (got) {
++            bool current = job.gen == atomic_load(&s_gen);
++            switch (job.type) {
++            case JOB_WARM:
++                if (!conn_fresh() && !r.active) {
++                    for (int waited = 0; !muse_wifi_connected() && waited < WARM_WIFI_WAIT_MS; waited += 100) {
++                        vTaskDelay(pdMS_TO_TICKS(100));
++                    }
++                    if (muse_wifi_connected() && !conn_fresh()) {
++                        conn_open();
++                    }
++                }
++                break;
++            case JOB_SAY:
++                if (current && job.gen != s_failed_gen) {
++                    say(job.gen, job.text);
++                }
++                free(job.text);
++                break;
++            case JOB_END:
++                if (current) {
++                    end_reply(job.gen);
++                }
++                break;
++            }
++        }
++
++        if (s_tls && !poll_rx()) {
++            finish("connection dropped");
++        }
++        if (r.ending && now_us() - r.last_rx_us > IO_TIMEOUT_US) {
++            ESP_LOGW(TAG, "the xAI API went quiet");
++            conn_close();
++            finish("timed out");
++        }
++        if (!r.active && s_tls && now_us() - s_last_use_us > IDLE_CLOSE_US) {
++            conn_close();   /* nothing to say for a while: free it */
++        }
++    }
++}
++
++/* --- API ------------------------------------------------------------------------------ */
++
++static bool ensure_worker(void)
++{
++    if (s_task) {
++        return true;
++    }
++    s_queue = xQueueCreate(QUEUE_LEN, sizeof(job_t));
++    s_msg = heap_caps_malloc(MSG_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!s_queue || !s_msg ||
++        xTaskCreatePinnedToCoreWithCaps(worker, "xai_tts", STACK, NULL, 4, &s_task, tskNO_AFFINITY,
++                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
++        ESP_LOGE(TAG, "can't start the speech task");
++        s_task = NULL;
++        return false;
++    }
++    return true;
++}
++
++void muse_xai_tts_warm(void)
++{
++    if (!muse_xai_tts_configured() || !ensure_worker()) {
++        return;
++    }
++    job_t job = { .type = JOB_WARM, .gen = atomic_load(&s_gen) };
++    xQueueSend(s_queue, &job, 0);
++}
++
++bool muse_xai_tts_begin(StreamBufferHandle_t out)
++{
++    if (!muse_xai_tts_configured() || !ensure_worker()) {
++        return false;
++    }
++    s_out = out;
++    atomic_store(&s_audio_bytes, 0);
++    atomic_fetch_add(&s_gen, 1);
++    atomic_store(&s_state, MUSE_GEMINI_TTS_RUNNING);
++    return true;
++}
++
++bool muse_xai_tts_say(const char *text, size_t len)
++{
++    char *copy = malloc(len + 1);
++    if (!copy) {
++        return false;
++    }
++    memcpy(copy, text, len);
++    copy[len] = '\0';
++    job_t job = { .type = JOB_SAY, .gen = atomic_load(&s_gen), .text = copy };
++    if (xQueueSend(s_queue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
++        free(copy);
++        return false;
++    }
++    return true;
++}
++
++void muse_xai_tts_end(void)
++{
++    job_t job = { .type = JOB_END, .gen = atomic_load(&s_gen) };
++    if (xQueueSend(s_queue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
++        atomic_store(&s_state, atomic_load(&s_audio_bytes) ? MUSE_GEMINI_TTS_DONE : MUSE_GEMINI_TTS_FAILED);
++    }
++}
++
++muse_gemini_tts_state_t muse_xai_tts_state(void)
++{
++    return (muse_gemini_tts_state_t)atomic_load(&s_state);
++}
++
++void muse_xai_tts_cancel(void)
++{
++    atomic_fetch_add(&s_gen, 1);
++    atomic_store(&s_state, MUSE_GEMINI_TTS_IDLE);
++}
+diff --git a/esp32/components/muse/muse_xai_tts.h b/esp32/components/muse/muse_xai_tts.h
+new file mode 100644
+index 0000000..61f281b
+--- /dev/null
++++ b/esp32/components/muse/muse_xai_tts.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++
++#include "freertos/FreeRTOS.h"
++#include "freertos/stream_buffer.h"
++#include "muse_gemini_tts.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * Spoken replies through xAI's streaming text to speech (wss://api.x.ai/v1/tts),
++ * as headerless 16-bit little-endian mono PCM at the speaker's 16 kHz, so it
++ * goes to the reply buffer as it comes. The same calls as muse_gemini_tts.h,
++ * which hands them here whenever an xAI key is stored.
++ *
++ * A reply is one utterance on a kept WebSocket: each say() streams a sentence
++ * in as a text.delta, end() sends text.done, and the audio streams back as
++ * the server makes it. xAI limits requests per second, not per day.
++ *
++ * The API key is set over serial with the line ">xai_key=xai-..." and kept in
++ * NVS; ">xai_key=" with nothing after it clears it, and replies go back to
++ * Gemini if it has a key.
++ */
++
++/* Console hook for ">xai_key=...", the line without its '>'. False if it isn't that command. */
++bool muse_xai_tts_console_command(const char *line);
++
++/* A key is stored. */
++bool muse_xai_tts_configured(void);
++
++/* Opens the connection ahead of a reply, if there's a key and none is open. Returns at once. */
++void muse_xai_tts_warm(void);
++
++/* Starts a reply whose PCM goes to `out` (empty it first). False if there's no key. */
++bool muse_xai_tts_begin(StreamBufferHandle_t out);
++
++/* Queues one sentence of the reply (copied). False if it couldn't be queued. */
++bool muse_xai_tts_say(const char *text, size_t len);
++
++/* No more sentences: the state becomes DONE or FAILED once the audio has all come. */
++void muse_xai_tts_end(void);
++
++muse_gemini_tts_state_t muse_xai_tts_state(void);
++
++/* Drops the reply: queued sentences are skipped and the audio still coming is cut off. */
++void muse_xai_tts_cancel(void);
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/esp32/devices/sdkconfig.muse-m5stack-stopwatch b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
-index 3aef13f..58f411d 100644
+index 3aef13f..1ca3849 100644
 --- a/esp32/devices/sdkconfig.muse-m5stack-stopwatch
 +++ b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
-@@ -68,3 +68,11 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+@@ -68,3 +68,15 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
  # actually slept, and how long each power lock kept the chip awake.
  CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
  CONFIG_PM_PROFILING=y
@@ -4034,6 +5416,10 @@ index 3aef13f..58f411d 100644
 +
 +# The avatar clips live in their own partition (partitions_stopwatch.csv: partitions_muse.csv + "anims").
 +CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_stopwatch.csv"
++
++# Internal RAM is the scarce resource. Unread TCP data waits in Wi-Fi RX buffers, which must be
++# internal; 16 caps that backlog at ~26 KB. The SDK pins the TCP window at 16384 for the tunnel.
++CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
 diff --git a/esp32/main/app.c b/esp32/main/app.c
 index b7f076d..1ea183c 100644
 --- a/esp32/main/app.c
@@ -4108,27 +5494,29 @@ index 712b6b3..a255d49 100644
      return clear_and_verify(keys, sizeof(keys) / sizeof(keys[0]));
  }
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 29d4d8b..87a70d3 100644
+index 29d4d8b..febe5e4 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
-@@ -34,6 +34,9 @@
+@@ -34,6 +34,10 @@
  #include "identity.h"
  #include "noise_control.h"
  #include "sdk_token_console.h"
 +#if CONFIG_MUSE_HATCH
 +#include "muse_gemini_tts.h"
++#include "muse_xai_tts.h"
 +#endif
  #include "stack_monitor.h"
  #include "wifi_known.h"
  #include "wifi_mgr.h"
-@@ -629,13 +632,21 @@ static void boot_task(void *arg) {
+@@ -629,13 +633,22 @@ static void boot_task(void *arg) {
      vTaskDelete(NULL);
  }
  
-+// Serial-only setup lines: the SDK token, and the Gemini key for spoken replies.
++// Serial-only setup lines: the SDK token, and the Gemini or xAI key for spoken replies.
 +static bool console_hook(const char *line) {
 +#if CONFIG_MUSE_HATCH
 +    if (muse_gemini_tts_console_command(line)) return true;
++    if (muse_xai_tts_console_command(line)) return true;
 +#endif
 +    return sdk_token_console_command(line);
 +}
