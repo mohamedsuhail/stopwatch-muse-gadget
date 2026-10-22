@@ -50,15 +50,15 @@ static bool s_tried, s_ok;
 static uint16_t *s_frame;            /* the decoded frame, RGB565 */
 static int s_shown = -1;             /* its global frame number */
 
-/* Accents for the UI around the avatar: the same per-state colours as before. */
+/* Accents for the UI around the avatar (the ring and level bars), from the astronaut's suit. */
 static const uint32_t ACCENT[MUSE_MODE_COUNT] = {
-    [MUSE_MODE_BOOT] = 0xa9c0ff,
-    [MUSE_MODE_IDLE] = 0xa77dff,
-    [MUSE_MODE_LISTENING] = 0x5cb8ff,
-    [MUSE_MODE_THINKING] = 0xe07bff,
-    [MUSE_MODE_SPEAKING] = 0x6ff0bf,
-    [MUSE_MODE_ERROR] = 0xff5c5c,
-    [MUSE_MODE_OFF] = 0x7c72d0,
+    [MUSE_MODE_BOOT] = 0xbdbdbd,        /* grey */
+    [MUSE_MODE_IDLE] = 0xffffff,        /* the helmet's white */
+    [MUSE_MODE_LISTENING] = 0x3cc8e6,   /* the antennae's cyan */
+    [MUSE_MODE_THINKING] = 0xffc83d,    /* the buttons' yellow */
+    [MUSE_MODE_SPEAKING] = 0xff7a2e,    /* the suit's orange */
+    [MUSE_MODE_ERROR] = 0xff4d4d,
+    [MUSE_MODE_OFF] = 0x6e6e6e,
 };
 
 uint32_t muse_pixel_accent(muse_mode_t mode)

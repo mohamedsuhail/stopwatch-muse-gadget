@@ -42,16 +42,17 @@ index 73c8ffa..01f84f3 100644
  if(CONFIG_MUSE_ENABLED)
      # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..f227f41 100644
+index 7330e5e..8afff14 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-@@ -1095,7 +1095,13 @@ static const muse_board_t s_board = {
+@@ -1095,7 +1095,14 @@ static const muse_board_t s_board = {
      .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
 +    .battery_ring = { LV_ALIGN_CENTER, 180, 0 },     /* 3 o'clock, the Wi-Fi icon inside it */
      .frame_ms = 40,
 +    .avatar_px = 384,           /* 6x the 64 px grid, leaving room for the tape and text */
++    .avatar_dy = 60,            /* out from under the tape */
 +    .power_wakes_only = true,   /* only red (power) and blue (talk) wake it */
 +    .hide_rim_hints = true,     /* a clean screen: no mic/speaker/power icons */
 +    .tape_label = true,         /* MOBOT on painter's tape, top-left */
@@ -1556,13 +1557,14 @@ index 0000000..0983a7e
 +#endif /*#if MUSE_FONT_BOLD_20*/
 +
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index ddf486b..1e718be 100644
+index ddf486b..db2dac7 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
-@@ -88,6 +88,18 @@ typedef struct {
+@@ -88,6 +88,19 @@ typedef struct {
      bool flat_menu_hints;
      int frame_ms;           /* face animation period */
      int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
++    int avatar_dy;          /* full layout: move the avatar this many px down from its usual spot */
 +    /* Asleep, only the power and talk buttons wake it: touch and the speaker key are ignored. */
 +    bool power_wakes_only;
 +    /* rim_controls boards: keep the rim's button icons (mic, speaker, power) hidden. */
@@ -3141,7 +3143,7 @@ index 6a372ac..571658d 100644
  
  /* ---------- Battery ---------- */
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..0f67fee 100644
+index d0d4e2f..433a43d 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -3166,16 +3168,18 @@ index d0d4e2f..0f67fee 100644
  
  #define COLOR_DIM 0x8b84a8
 -#define COLOR_CAPTION 0xd8d2ff
+-#define COLOR_RING_BG 0x140f22
+-#define COLOR_METER_OFF 0x1d1733
 +#define COLOR_CAPTION 0xffffff   /* white on its scrim */
- #define COLOR_RING_BG 0x140f22
- #define COLOR_METER_OFF 0x1d1733
++#define COLOR_RING_BG 0x1c1c1c
++#define COLOR_METER_OFF 0x2a2a2a
  #define COLOR_ACCENT 0xa77dff
 -#define COLOR_DOT_OFF 0x3a3358
 +#define COLOR_DOT_OFF 0x4a4a4a
  #define COLOR_LIT 0xf2efff
  #define SETTINGS_TICK_S 0.25f
  
-@@ -132,6 +133,14 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
+@@ -132,6 +133,15 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
  static lv_obj_t *s_state_lbl;
  static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
  static lv_obj_t *s_power_lbl;
@@ -3184,13 +3188,14 @@ index d0d4e2f..0f67fee 100644
 +static lv_obj_t *s_tape;        /* muse_board->tape_label */
 +static bool s_on_settings;      /* the settings page is showing: no tape or ring */
 +#define BATT_RING_PX 46
-+#define BATT_GREEN 0x3ddc84
++#define BATT_WHITE 0xffffff
++#define BATT_GREEN 0x3ddc84   /* charging */
 +#define BATT_YELLOW 0xffc83d
 +#define BATT_RED 0xff4d4d
  static lv_obj_t *s_caption_lbl;
  static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
  static lv_obj_t *s_meter[METER_SEGS];
-@@ -190,6 +199,56 @@ static int s_big_y;             /* Muse's centre at full size */
+@@ -190,6 +200,56 @@ static int s_big_y;             /* Muse's centre at full size */
  static int s_muse_y;            /* and now */
  static int s_from_px, s_from_y, s_to_px, s_to_y;
  
@@ -3247,7 +3252,7 @@ index d0d4e2f..0f67fee 100644
  static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
      [MUSE_MODE_BOOT] = "WAKING UP",
      [MUSE_MODE_IDLE] = "READY",
-@@ -502,24 +561,50 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
+@@ -502,24 +562,50 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
      return s_small ? compact : full;
  }
  
@@ -3307,7 +3312,7 @@ index d0d4e2f..0f67fee 100644
  }
  
  static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
-@@ -667,7 +752,7 @@ static void set_answer(int which)
+@@ -667,7 +753,7 @@ static void set_answer(int which)
          lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
      }
      if (l) {
@@ -3316,7 +3321,7 @@ index d0d4e2f..0f67fee 100644
          lv_obj_align(s_reply_lbl, LV_ALIGN_CENTER, 0, l->top + l->h / 2);
          lv_obj_set_style_text_align(s_reply_lbl, l->align, 0);
      }
-@@ -794,6 +879,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -794,6 +880,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
      lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
      lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
      lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -3324,7 +3329,7 @@ index d0d4e2f..0f67fee 100644
  
      if (muse_board->touch && !muse_board->rim_controls) {
          build_speaker(face, spk_x, spk_y);
-@@ -801,7 +887,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -801,7 +888,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
  
      /* Out of the way while a page is up: the mode name, where Muse was. */
      lv_obj_update_layout(face);
@@ -3335,7 +3340,7 @@ index d0d4e2f..0f67fee 100644
      s_answers[ANSWER_READ].hides[1] = s_name_lbl;   /* the reply takes the top too */
      add_hides(&s_answers[ANSWER_READ], 2);
      add_hides(&s_answers[ANSWER_HEARD], 0);
-@@ -897,7 +985,7 @@ static void build_screen(void)
+@@ -897,7 +986,7 @@ static void build_screen(void)
       * whose blank bottom rows can tuck in behind the meter.
       */
      int ring_in = (s_w < s_h ? s_w : s_h) / 2 - 10;   /* the ring's inner edge */
@@ -3344,7 +3349,7 @@ index d0d4e2f..0f67fee 100644
      int cap_bottom = 179;                              /* a 466 px circle's; fine for rectangles */
      if (muse_board->round) {
          cap_bottom = (int)sqrtf((float)(ring_in * ring_in - CAPTION_W * CAPTION_W / 4)) - 3;
-@@ -906,6 +994,11 @@ static void build_screen(void)
+@@ -906,6 +995,14 @@ static void build_screen(void)
      int meter_y = cap_top - 6 - METER_SEG_PX / 2;
      int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
      s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
@@ -3353,10 +3358,13 @@ index d0d4e2f..0f67fee 100644
 +         * on screen and let the meter and captions overlay its lower rows. */
 +        s_big_y = -(s_h - s_canvas_px) / 2;
 +    }
++    if (!s_small) {
++        s_big_y += muse_board->avatar_dy;
++    }
  
      /* The character. */
      muse_image_init();
-@@ -933,24 +1026,31 @@ static void build_screen(void)
+@@ -933,24 +1030,31 @@ static void build_screen(void)
      s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
@@ -3393,7 +3401,7 @@ index d0d4e2f..0f67fee 100644
          lv_label_set_long_mode(s_state_lbl, LV_LABEL_LONG_MODE_DOTS);
          lv_label_set_long_mode(s_name_lbl, LV_LABEL_LONG_MODE_DOTS);
      }
-@@ -984,7 +1084,8 @@ static void build_screen(void)
+@@ -984,7 +1088,8 @@ static void build_screen(void)
          return;
      }
      /* Fixed height: a longer caption ends in dots rather than growing into the ring. */
@@ -3403,7 +3411,7 @@ index d0d4e2f..0f67fee 100644
      lv_obj_set_style_text_line_space(s_caption_lbl, CAPTION_LINE_SPACE, 0);
      lv_label_set_long_mode(s_caption_lbl, LV_LABEL_LONG_MODE_DOTS);
      lv_obj_align(s_caption_lbl, LV_ALIGN_CENTER, 0, cap_top + cap_h / 2);
-@@ -1010,6 +1111,9 @@ static void build_screen(void)
+@@ -1010,6 +1115,9 @@ static void build_screen(void)
  static void on_cover_event(lv_event_t *e)
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
@@ -3413,7 +3421,7 @@ index d0d4e2f..0f67fee 100644
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
          muse_state_set_asleep(false);
-@@ -1109,9 +1213,19 @@ static void update_control_hints(muse_mode_t mode)
+@@ -1109,9 +1217,19 @@ static void update_control_hints(muse_mode_t mode)
      if (!s_ptt_hint) return;
      /* Don't obscure settings rows/keyboards with floating physical icons. */
      bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
@@ -3436,7 +3444,7 @@ index d0d4e2f..0f67fee 100644
      static int last_mode = -1;
      if ((int)mode != last_mode) {
          color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
-@@ -1173,6 +1287,53 @@ static void build_overlays(void)
+@@ -1173,6 +1291,53 @@ static void build_overlays(void)
          update_control_hints(MUSE_MODE_BOOT);
      }
  
@@ -3458,7 +3466,7 @@ index d0d4e2f..0f67fee 100644
 +        lv_obj_remove_style(s_batt_arc, NULL, LV_PART_KNOB);
 +        lv_obj_remove_flag(s_batt_arc, LV_OBJ_FLAG_CLICKABLE);
 +        lv_obj_set_style_arc_width(s_batt_arc, 4, LV_PART_MAIN);
-+        lv_obj_set_style_arc_color(s_batt_arc, lv_color_hex(0x2c2840), LV_PART_MAIN);
++        lv_obj_set_style_arc_color(s_batt_arc, lv_color_hex(0x333333), LV_PART_MAIN);
 +        lv_obj_set_style_arc_width(s_batt_arc, 4, LV_PART_INDICATOR);
 +        lv_obj_set_style_arc_rounded(s_batt_arc, true, LV_PART_INDICATOR);
 +        /* The Wi-Fi icon inside the ring; the ring's fill and colour are the charge. */
@@ -3490,7 +3498,7 @@ index d0d4e2f..0f67fee 100644
      /* BLE pairing code, or the Muse app's ask for the talk button: a centred
       * column in one typeface, the code large. The small card grows with the hint. */
      s_pair = lv_obj_create(lv_layer_top());
-@@ -1302,7 +1463,7 @@ static void update_chrome(float now)
+@@ -1302,7 +1467,7 @@ static void update_chrome(float now)
          int shown = page * 2 + subpage;
          if (shown != s_shown_page) {
              for (int i = 0; i < 2; i++) {
@@ -3499,7 +3507,7 @@ index d0d4e2f..0f67fee 100644
                  lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
              }
              s_shown_page = shown;
-@@ -1318,6 +1479,9 @@ static void update_chrome(float now)
+@@ -1318,6 +1483,9 @@ static void update_chrome(float now)
      if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
          lv_label_set_text(s_wifi_icon, wifi);
      }
@@ -3509,7 +3517,7 @@ index d0d4e2f..0f67fee 100644
      s_idle_name = idle_name(w.state);
      muse_ble_status_t b;
      muse_ble_status(&b);
-@@ -1337,7 +1501,7 @@ static void update_chrome(float now)
+@@ -1337,7 +1505,7 @@ static void update_chrome(float now)
       * read layout unhides it on the way out. A narrow screen gets the hex tail
       * on its own, which is the part that differs between two of them, rather
       * than a head that ends in dots before it gets there. */
@@ -3518,7 +3526,7 @@ index d0d4e2f..0f67fee 100644
      int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
      const char *shown = paired ? "" : b.name;
  #if LV_USE_SNAPSHOT
-@@ -1442,6 +1606,15 @@ static void update_power(float now)
+@@ -1442,6 +1610,15 @@ static void update_power(float now)
      if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
          lv_label_set_text(s_power_lbl, buf);
      }
@@ -3526,7 +3534,7 @@ index d0d4e2f..0f67fee 100644
 +        lv_obj_set_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN, p.battery_pct < 0 || s_on_settings);
 +        if (p.battery_pct >= 0) {
 +            int pct = p.battery_pct > 100 ? 100 : p.battery_pct;
-+            uint32_t color = p.charging || pct > 30 ? BATT_GREEN : pct >= 15 ? BATT_YELLOW : BATT_RED;
++            uint32_t color = p.charging ? BATT_GREEN : pct > 30 ? BATT_WHITE : pct >= 15 ? BATT_YELLOW : BATT_RED;
 +            lv_arc_set_value(s_batt_arc, pct);
 +            lv_obj_set_style_arc_color(s_batt_arc, lv_color_hex(color), LV_PART_INDICATOR);
 +        }
@@ -3534,7 +3542,7 @@ index d0d4e2f..0f67fee 100644
  }
  
  static void update_status(muse_mode_t mode, float now)
-@@ -1450,11 +1623,13 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1450,11 +1627,13 @@ static void update_status(muse_mode_t mode, float now)
      const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
  
      if (name != s_shown_name) {
@@ -3550,7 +3558,7 @@ index d0d4e2f..0f67fee 100644
          if (s_ring) {
              lv_obj_set_style_arc_color(s_ring, lv_color_hex(accent), LV_PART_INDICATOR);
          } else {
-@@ -1540,7 +1715,8 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1540,7 +1719,8 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif

@@ -269,7 +269,9 @@ python3 tools/muse/make_gifs.py --src ../../../avatar/muse_pixel.c /tmp/avatar_g
 
 The board file sets `.avatar_px = 384` (6× the 64 px grid), which leaves room for the tape label
 and the text. A canvas taller than the space above the captions is kept on screen, and the level
-meter and captions draw over its lower rows (`muse_ui.c`).
+meter and captions draw over its lower rows (`muse_ui.c`). `.avatar_dy = 60` then moves it 60 px
+down, so the helmet and antennae clear the tape. `avatar/position-options.png` compares the
+offsets that were considered.
 
 ### Battery and sleep
 
@@ -304,8 +306,8 @@ Nothing leaves the watch until you hold the blue button.
 
 **Battery and Wi-Fi ring.** A ring at 3 o'clock with the Wi-Fi symbol inside.
 
-- **Charge:** the ring's fill. Green above 30%, yellow from 15 to 30%, red below 15%, green while
-  charging.
+- **Charge:** the ring's fill on a dark grey track. White above 30%, yellow from 15 to 30%, red
+  below 15%, green while charging.
 - **Wi-Fi symbol:** steady when connected, blinking while joining.
 - **Updates:** once a second. The ring is hidden when the watch can't read the battery.
 - **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 180, 0 }`). Setting it also
@@ -327,7 +329,9 @@ buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
 - **Scrim:** a soft dark band (black, 70% opaque, rounded) sits behind the state word, captions
   and replies, so white text reads clearly over the white helmet.
 - **Colours:** black and white. Captions, page dots and the settings pages' switches, sliders and
-  buttons are white or grey rather than violet. The ring and level bars keep each state's accent.
+  buttons are white or grey rather than violet. The ring and level bars take each state's colour
+  from the astronaut's suit (`ACCENT` in `avatar/character/muse_pixel.c`), on dark grey tracks:
+  Ready white, Listening cyan, Thinking yellow, Speaking orange, Error red, Waking and Off grey.
 
 **Tape label.** `.tape_label = true` draws "MOBOT" on worn white painter's tape across the
 top-left: grime, smudges, rubbed marker, and "A7·22·10·K" (22 Oct) in blue ballpoint. It's one
@@ -374,6 +378,7 @@ stopwatch-muse-gadget/
 │   ├── tape.rgb565a8     # the tape label the firmware embeds
 │   ├── tape.png          # ...and a preview of it
 │   ├── status-mockup.png # the battery ring's states, mocked up
+│   ├── position-options.png # the character 0–60 px lower under the tape
 │   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
