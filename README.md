@@ -161,20 +161,43 @@ All SDK changes are in `patches/0001-stopwatch-customizations.patch`. The avatar
 The pinned SDK shows Muse's replies as captions and plays silence in place of speech. Its README
 leaves speech to "a text-to-speech API of your choice". The patch adds:
 
-- **`components/muse/muse_gemini_tts.c/.h`:** posts each finished reply (up to its first 1,023
-  characters) to the Gemini Interactions API, streamed, and plays the audio as it arrives.
+- **`components/muse/muse_gemini_tts.c/.h`:** speaks a reply (up to its first 1,023 characters)
+  through the Gemini Interactions API, streamed, and plays the audio as it arrives.
+  - One worker task speaks the sentences in order, over a single TLS connection it keeps open
+    (HTTP/1.1 keep-alive). It opens that connection when you start talking, while Muse is still
+    thinking. An idle connection closes after 60 s. Reconnects resume the TLS session
+    (`CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS`), which makes the handshake shorter.
   - The API sends 24 kHz 16-bit mono PCM, whatever `sample_rate` the request asks for. The watch
     resamples it to the speaker's 16 kHz.
   - The model is `gemini-3.8-flash-lite-tts`, and the voice is `Achernar` (`VOICE` in that file).
     You can use any of the 30 prebuilt voices, such as Kore or Puck.
   - If the request fails, the reply falls back to captions. The serial log says why.
-- **`muse_chat_session.cpp`:** `start_tts()` speaks a reply when the speaker is on and a key is
-  set, and shows captions otherwise.
+  - Each sentence logs its timing, for example
+    `sentence 1 (51 chars, kept connection): first audio 1095 ms, 4.00s of speech in 2.63s`.
+- **`muse_chat_session.cpp`:** speaks a reply while its text is still streaming in.
+  - The first piece goes to Gemini as soon as one sentence of at least 16 characters is complete.
+  - Later pieces group sentences into about 80 characters, which means fewer requests and smoother
+    speech.
+  - A number's period, as in "1." or "3.5", doesn't end a sentence.
+  - With the speaker off, or no key set, replies are shown as captions.
+  - The turn's timing line includes `tts` (first piece sent) and `audio` (first sound), in ms
+    after you let go of the button.
 - **`main/muse_glue.c`:** routes the `>gemini_key=` serial command.
 - **`devices/sdkconfig.muse-m5stack-stopwatch`:**
-  `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y`. Google's servers present
-  GTS Root R4 cross-signed by GlobalSign, and without this option the watch rejects the
-  certificate.
+  - `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y`. Google's servers present GTS Root R4
+    cross-signed by GlobalSign, and without this option the watch rejects the certificate.
+  - `CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y`, for resumed TLS sessions.
+
+**Measured latency** (Oct 22, 2026, times after letting go of the talk button):
+
+| | Before | After |
+| --- | --- | --- |
+| Muse's text arrives → first sound | 3.3 to 3.8 s | 1.0 to 1.5 s |
+| Gemini, until its first audio | about 1.0 s | about 1.0 s, whatever the text length |
+| Long replies | silent until the whole reply arrived | start after the first sentence |
+
+Most of the remaining wait is Muse thinking (2 to 6 s after it receives the voice note), which
+happens on Muse's server.
 
 ### Avatar
 

@@ -20,6 +20,11 @@ Done:
       with `>gemini_key=`.
 - [x] Fixed TLS to Google. It needed `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY`
       (GTS Root R4 is cross-signed by GlobalSign).
+- [x] Faster speech (Oct 22):
+  - A kept TLS connection to Gemini, opened while Muse thinks.
+  - Replies spoken sentence by sentence as the text streams in.
+  - TLS session resumption for reconnects.
+  - Text-to-first-sound went from 3.3–3.8 s to 1.0–1.5 s. Details in the README.
 - [x] Custom avatar: the toy astronaut, at 448 px (7×), centred on the round screen.
 - [x] Battery work:
   - Auto-sleep is 30 s.
