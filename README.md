@@ -18,6 +18,7 @@ On top of the stock SDK, this repo adds:
   the round screen.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
   asleep on battery for a while.
+- **Battery ring.** The charge shows in the bottom-right corner.
 - **Button-only wake.** While asleep, red wakes the watch, and holding blue wakes it and listens.
   Taps on the screen and a quick click of blue are ignored.
 
@@ -276,6 +277,20 @@ reason.
 audio in a memory-only ring buffer. That way the first word isn't clipped when you press talk.
 Nothing leaves the watch until you hold the blue button.
 
+### Battery ring
+
+A ring in the bottom-right corner, mirroring the PWR label, shows the charge, with the percentage
+inside.
+
+- **Colour:** green above 30%, yellow from 15 to 30%, red below 15%.
+- **Charging:** green, with a lightning bolt.
+- **Updates:** once a second. It's hidden when the watch can't read the battery.
+- **Code:** the board file places it (`.battery_ring = { LV_ALIGN_CENTER, 144, 110 }`), and
+  `update_power()` in `muse_ui.c` draws it. `avatar/battery-preview.png` shows the four states.
+
+The SDK's own "BATTERY 85%" text in the top status line is still there, but the 448 px avatar now
+covers it.
+
 ### Wake
 
 The board file sets `.power_wakes_only = true`. While asleep, touch and the yellow button are
@@ -298,6 +313,7 @@ stopwatch-muse-gadget/
 ├── avatar/
 │   ├── muse_pixel.c      # the astronaut avatar renderer
 │   ├── preview.png       # every state, enlarged
+│   ├── battery-preview.png  # the battery ring at 85%, 25%, 8% and charging
 │   └── size-options.png  # on-screen size options compared
 ├── docs/
 │   ├── plan.md           # project plan and status

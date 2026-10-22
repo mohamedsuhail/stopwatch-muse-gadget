@@ -12,12 +12,14 @@ index 73c8ffa..0cbe711 100644
      else()
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..f1735d1 100644
+index 7330e5e..7e49192 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-@@ -1096,6 +1096,8 @@ static const muse_board_t s_board = {
+@@ -1095,7 +1095,10 @@ static const muse_board_t s_board = {
+     .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
++    .battery_ring = { LV_ALIGN_CENTER, 144, 110 },   /* the free fourth corner, mirroring power */
      .frame_ms = 40,
 +    .avatar_px = 448,           /* 7x the 64 px grid: most of the 466 px circle */
 +    .power_wakes_only = true,   /* only red (power) and blue (talk) wake it */
@@ -25,15 +27,17 @@ index 7330e5e..f1735d1 100644
      .display_start = display_start,
      .display_lock = display_lock,
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index ddf486b..220711d 100644
+index ddf486b..8539d71 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
-@@ -88,6 +88,8 @@ typedef struct {
+@@ -88,6 +88,10 @@ typedef struct {
      bool flat_menu_hints;
      int frame_ms;           /* face animation period */
      int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
 +    /* Asleep, only the power and talk buttons wake it: touch and the speaker key are ignored. */
 +    bool power_wakes_only;
++    /* A battery ring (charge, colour by level, bolt while charging) at this spot; .align 0 = none. */
++    muse_button_hint_t battery_ring;
  
      /* Power rails, buses, expanders. Runs first. */
      esp_err_t (*init)(void);
@@ -1554,10 +1558,22 @@ index 6a372ac..f8dc332 100644
  
  /* ---------- Battery ---------- */
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..be826f3 100644
+index d0d4e2f..fe2c28c 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
-@@ -906,6 +906,11 @@ static void build_screen(void)
+@@ -132,6 +132,11 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
+ static lv_obj_t *s_state_lbl;
+ static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
+ static lv_obj_t *s_power_lbl;
++static lv_obj_t *s_batt_ring, *s_batt_arc, *s_batt_pct, *s_batt_bolt;   /* muse_board->battery_ring */
++#define BATT_RING_PX 46
++#define BATT_GREEN 0x3ddc84
++#define BATT_YELLOW 0xffc83d
++#define BATT_RED 0xff4d4d
+ static lv_obj_t *s_caption_lbl;
+ static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
+ static lv_obj_t *s_meter[METER_SEGS];
+@@ -906,6 +911,11 @@ static void build_screen(void)
      int meter_y = cap_top - 6 - METER_SEG_PX / 2;
      int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
      s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
@@ -1569,7 +1585,7 @@ index d0d4e2f..be826f3 100644
  
      /* The character. */
      muse_image_init();
-@@ -1010,6 +1015,9 @@ static void build_screen(void)
+@@ -1010,6 +1020,9 @@ static void build_screen(void)
  static void on_cover_event(lv_event_t *e)
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
@@ -1579,6 +1595,68 @@ index d0d4e2f..be826f3 100644
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
          muse_state_set_asleep(false);
+@@ -1173,6 +1186,35 @@ static void build_overlays(void)
+         update_control_hints(MUSE_MODE_BOOT);
+     }
+ 
++    if (muse_board->battery_ring.align) {
++        /* Charge as a ring with the percentage inside; filled in by update_power(). */
++        s_batt_ring = lv_obj_create(scr);
++        lv_obj_remove_style_all(s_batt_ring);
++        lv_obj_set_size(s_batt_ring, BATT_RING_PX, BATT_RING_PX);
++        lv_obj_remove_flag(s_batt_ring, LV_OBJ_FLAG_CLICKABLE);
++        lv_obj_remove_flag(s_batt_ring, LV_OBJ_FLAG_SCROLLABLE);
++        lv_obj_align(s_batt_ring, muse_board->battery_ring.align, muse_board->battery_ring.x,
++                     muse_board->battery_ring.y);
++        s_batt_arc = lv_arc_create(s_batt_ring);
++        lv_obj_set_size(s_batt_arc, BATT_RING_PX, BATT_RING_PX);
++        lv_obj_center(s_batt_arc);
++        lv_arc_set_rotation(s_batt_arc, 270);
++        lv_arc_set_bg_angles(s_batt_arc, 0, 360);
++        lv_arc_set_range(s_batt_arc, 0, 100);
++        lv_obj_remove_style(s_batt_arc, NULL, LV_PART_KNOB);
++        lv_obj_remove_flag(s_batt_arc, LV_OBJ_FLAG_CLICKABLE);
++        lv_obj_set_style_arc_width(s_batt_arc, 4, LV_PART_MAIN);
++        lv_obj_set_style_arc_color(s_batt_arc, lv_color_hex(0x2c2840), LV_PART_MAIN);
++        lv_obj_set_style_arc_width(s_batt_arc, 4, LV_PART_INDICATOR);
++        lv_obj_set_style_arc_rounded(s_batt_arc, true, LV_PART_INDICATOR);
++        s_batt_pct = make_label(s_batt_ring, &lv_font_montserrat_16, BATT_GREEN);
++        lv_obj_align(s_batt_pct, LV_ALIGN_CENTER, 0, -1);
++        s_batt_bolt = make_label(s_batt_ring, &lv_font_montserrat_14, BATT_GREEN);
++        lv_label_set_text(s_batt_bolt, LV_SYMBOL_CHARGE);
++        lv_obj_align(s_batt_bolt, LV_ALIGN_CENTER, 0, 14);
++        lv_obj_add_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN);   /* until there's a reading */
++    }
++
+     /* BLE pairing code, or the Muse app's ask for the talk button: a centred
+      * column in one typeface, the code large. The small card grows with the hint. */
+     s_pair = lv_obj_create(lv_layer_top());
+@@ -1442,6 +1484,25 @@ static void update_power(float now)
+     if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
+         lv_label_set_text(s_power_lbl, buf);
+     }
++    if (s_batt_ring) {
++        lv_obj_set_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN, p.battery_pct < 0);
++        if (p.battery_pct >= 0) {
++            int pct = p.battery_pct > 100 ? 100 : p.battery_pct;
++            uint32_t color = p.charging || pct > 30 ? BATT_GREEN : pct >= 15 ? BATT_YELLOW : BATT_RED;
++            lv_arc_set_value(s_batt_arc, pct);
++            lv_obj_set_style_arc_color(s_batt_arc, lv_color_hex(color), LV_PART_INDICATOR);
++            char num[8];
++            snprintf(num, sizeof(num), "%d", pct);
++            if (strcmp(num, lv_label_get_text(s_batt_pct)) != 0) {
++                lv_label_set_text(s_batt_pct, num);
++            }
++            lv_obj_set_style_text_color(s_batt_pct, lv_color_hex(color), 0);
++            lv_obj_set_style_text_color(s_batt_bolt, lv_color_hex(color), 0);
++            lv_obj_set_flag(s_batt_bolt, LV_OBJ_FLAG_HIDDEN, !p.charging);
++            /* The number sits in the middle, or a little higher with the bolt under it. */
++            lv_obj_align(s_batt_pct, LV_ALIGN_CENTER, 0, p.charging ? -5 : -1);
++        }
++    }
+ }
+ 
+ static void update_status(muse_mode_t mode, float now)
 diff --git a/esp32/devices/sdkconfig.muse-m5stack-stopwatch b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
 index 3aef13f..992ea3c 100644
 --- a/esp32/devices/sdkconfig.muse-m5stack-stopwatch

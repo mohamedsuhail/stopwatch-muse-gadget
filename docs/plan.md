@@ -28,6 +28,7 @@ Done:
 - [x] Voice notes ask Muse for short spoken-style answers (`MUSE_VOICE_NOTE_STYLE`). The Gemini
       connection opens on wake (red button); resumed sessions take ~50 ms.
 - [x] Spoken text is cleaned of list numbers, bullets, markdown and emoji (Muse ignored "no lists").
+- [x] Battery ring in the bottom-right corner (green/yellow/red, bolt while charging).
 - [x] Custom avatar: the toy astronaut, at 448 px (7×), centred on the round screen.
 - [x] Battery work:
   - Auto-sleep is 30 s.
