@@ -8,6 +8,11 @@
  * frame changes and scaled to the canvas with bilinear filtering. Wake and
  * goodbye play once and hold their last frame; the rest loop. Without the
  * partition (or with a bad one) the canvas stays black.
+ *
+ * Everything is read with esp_partition_read() rather than through a
+ * mapping: with XIP from PSRAM the UI keeps running while NVS writes flash,
+ * and a mapped read then can return erased-flash bytes. The driver's reads
+ * wait for the write instead.
  */
 
 #include "muse_pixel.h"
@@ -34,10 +39,11 @@ typedef struct {
     uint16_t first, count, flags, pad;
 } clip_t;
 
-static const uint8_t *s_pack;        /* the mapped partition */
-static const clip_t *s_clips;
-static const uint32_t *s_index;      /* (offset, size) per frame */
+static const esp_partition_t *s_part;
+static clip_t s_clips[CLIP_COUNT];
+static uint32_t *s_index;            /* (offset, size) per frame, copied to RAM */
 static uint32_t s_frames;
+static uint8_t *s_jpeg;              /* the frame being decoded, read from flash */
 static int s_w, s_h, s_fps;
 static bool s_tried, s_ok;
 
@@ -70,7 +76,7 @@ static inline uint32_t rd32(const uint8_t *p)
     return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-/* Maps the partition and checks its header once. */
+/* Reads the header, clip table and frame index into RAM and checks them once. */
 static bool open_pack(void)
 {
     if (s_tried) {
@@ -83,39 +89,53 @@ static bool open_pack(void)
         ESP_LOGW(TAG, "no \"%s\" partition: the avatar stays blank", PART_NAME);
         return false;
     }
-    const void *map;
-    esp_partition_mmap_handle_t handle;
-    if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &map, &handle) != ESP_OK) {
-        ESP_LOGW(TAG, "can't map the animations");
+    uint8_t head[16 + CLIP_COUNT * 8];
+    if (esp_partition_read(part, 0, head, sizeof(head)) != ESP_OK) {
+        ESP_LOGW(TAG, "can't read the animations");
         return false;
     }
-    const uint8_t *p = map;
-    if (memcmp(p, "MANI", 4) || rd16(p + 4) != 1) {
+    if (memcmp(head, "MANI", 4) || rd16(head + 4) != 1) {
         ESP_LOGW(TAG, "no animations written yet (scripts/flash.sh writes them)");
         return false;
     }
-    s_w = rd16(p + 6);
-    s_h = rd16(p + 8);
-    s_fps = rd16(p + 10);
-    s_clips = (const clip_t *)(p + 12);
-    s_frames = rd32(p + 12 + CLIP_COUNT * 8);
-    s_index = (const uint32_t *)(p + 16 + CLIP_COUNT * 8);
-    if (s_w <= 0 || s_h <= 0 || s_w > MAX_SIDE || s_h > MAX_SIDE || !s_fps || !s_frames ||
-        16 + CLIP_COUNT * 8 + s_frames * 8 > part->size) {
+    s_w = rd16(head + 6);
+    s_h = rd16(head + 8);
+    s_fps = rd16(head + 10);
+    s_frames = rd32(head + 12 + CLIP_COUNT * 8);
+    uint32_t index_end = sizeof(head) + s_frames * 8;
+    if (s_w <= 0 || s_h <= 0 || s_w > MAX_SIDE || s_h > MAX_SIDE || !s_fps || !s_frames || s_frames > 0xffff ||
+        index_end > part->size) {
         ESP_LOGW(TAG, "animation header out of range");
         return false;
     }
     for (int c = 0; c < CLIP_COUNT; c++) {
+        const uint8_t *e = head + 12 + c * 8;
+        s_clips[c] = (clip_t){ rd16(e), rd16(e + 2), rd16(e + 4), 0 };
         if (!s_clips[c].count || s_clips[c].first + s_clips[c].count > s_frames) {
             ESP_LOGW(TAG, "clip %d out of range", c);
             return false;
         }
     }
-    s_frame = heap_caps_calloc((size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_frame) {
+    s_index = heap_caps_malloc(s_frames * 8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_index || esp_partition_read(part, sizeof(head), s_index, s_frames * 8) != ESP_OK) {
+        ESP_LOGW(TAG, "can't read the frame index");
         return false;
     }
-    s_pack = p;
+    uint32_t biggest = 0;
+    for (uint32_t f = 0; f < s_frames; f++) {
+        uint32_t off = s_index[f * 2], size = s_index[f * 2 + 1];
+        if (off < index_end || size < 4 || size > part->size - off) {
+            ESP_LOGW(TAG, "frame %u out of range", (unsigned)f);
+            return false;
+        }
+        biggest = size > biggest ? size : biggest;
+    }
+    s_frame = heap_caps_calloc((size_t)s_w * s_h, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_jpeg = heap_caps_malloc(biggest, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_frame || !s_jpeg) {
+        return false;
+    }
+    s_part = part;
     s_ok = true;
     ESP_LOGI(TAG, "%u frames, %dx%d at %d fps", (unsigned)s_frames, s_w, s_h, s_fps);
     return true;
@@ -154,24 +174,40 @@ static UINT jpeg_out(JDEC *jd, void *bitmap, JRECT *rect)
     return 1;
 }
 
-static void decode(int frame)
+/* Decodes a frame into s_frame. A failure (logged once per run of them) leaves
+ * the frame unshown, so the next tick tries again. */
+static bool decode(int frame)
 {
     static uint8_t pool[3100];   /* TJpgDec's work area */
-    src_t src = { s_pack + rd32((const uint8_t *)&s_index[frame * 2]),
-                  rd32((const uint8_t *)&s_index[frame * 2 + 1]), 0 };
-    JDEC jd;
+    static int s_failing;        /* failures in a row */
+    uint32_t size = s_index[frame * 2 + 1];
+    JRESULT r = JDR_INP;
     int64_t t0 = esp_timer_get_time();
-    JRESULT r = jd_prepare(&jd, jpeg_in, pool, sizeof(pool), &src);
-    if (r == JDR_OK) {
-        r = jd_decomp(&jd, jpeg_out, 0);
+    if (esp_partition_read(s_part, s_index[frame * 2], s_jpeg, size) == ESP_OK && s_jpeg[0] == 0xff &&
+        s_jpeg[1] == 0xd8) {
+        src_t src = { s_jpeg, size, 0 };
+        JDEC jd;
+        r = jd_prepare(&jd, jpeg_in, pool, sizeof(pool), &src);
+        if (r == JDR_OK) {
+            r = jd_decomp(&jd, jpeg_out, 0);
+        }
+    }
+    if (r != JDR_OK) {
+        if (!s_failing++) {
+            ESP_LOGW(TAG, "frame %d: decode error %d", frame, r);
+        }
+        return false;
+    }
+    if (s_failing) {
+        ESP_LOGI(TAG, "frames decode again (after %d failures)", s_failing);
+        s_failing = 0;
     }
     static bool logged;
-    if (r != JDR_OK) {
-        ESP_LOGW(TAG, "frame %d: decode error %d", frame, r);
-    } else if (!logged) {
+    if (!logged) {
         logged = true;
         ESP_LOGI(TAG, "a frame decodes in %d ms", (int)((esp_timer_get_time() - t0) / 1000));
     }
+    return true;
 }
 
 /* --- frame choice -------------------------------------------------------------------- */
@@ -209,8 +245,7 @@ void muse_pixel_render(const muse_pose_t *p)
     int n = (int)((p->t - s_since) * s_fps);
     n = c->flags & 1 ? (n < c->count ? n : c->count - 1) : n % c->count;
     int frame = c->first + n;
-    if (frame != s_shown) {
-        decode(frame);
+    if (frame != s_shown && frame >= 0 && frame < (int)s_frames && decode(frame)) {
         s_shown = frame;
     }
 }
