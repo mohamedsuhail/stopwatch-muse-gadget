@@ -318,13 +318,14 @@ Nothing leaves the watch until you hold the blue button.
 
 ### Screen
 
-**Battery and Wi-Fi ring.** A ring at 3 o'clock with the Wi-Fi symbol inside.
+**Battery and Wi-Fi ring.** A ring at 6 o'clock, under the captions, with the Wi-Fi symbol inside.
+It moved from 3 o'clock to leave the middle of the screen to replies, which stop above it.
 
 - **Charge:** the ring's fill on a dark grey track. White above 30%, yellow from 15 to 30%, red
   below 15%, green while charging. Full on USB is white (the charger keeps topping up at 100%).
 - **Wi-Fi symbol:** steady when connected, blinking while joining.
 - **Updates:** once a second. The ring is hidden when the watch can't read the battery.
-- **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 180, 0 }`). Setting it also
+- **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 0, 202 }`). Setting it also
   hides the SDK's top status line (Wi-Fi, Bluetooth and battery text).
 
 **Dots and ticks instead of status lines.** With `.listen_dots = true`, the voice task's status
@@ -342,9 +343,10 @@ The level meter, shown on boards without `.listen_dots`, is 14 round dots in the
 
 **Replies get the screen.** With `.big_reply = true`, the character stays full size through the
 dots and tick, and once Muse's reply text arrives it shrinks to the top centre and the text takes
-the rest of the circle: pages of 21 × 8 (up from 13 × 3 while speaking), whether the reply is heard
-or only read. Pages are cut by letter count, so the columns are counted in average letters (an
-"o" plus 2 px) rather than M's, which lets lines run the width of the screen.
+the rest of the circle: pages of 29 × 6 (up from 13 × 3 while speaking), whether the reply is heard
+or only read. The layout picks the widest page that still has 6 lines, centres the text, and the
+scrim hugs it. Pages are cut by letter count, so the columns are counted in "o"s rather than M's,
+which lets lines run nearly the width of the screen (`avatar/reply-layout-mockup.png`).
 
 **Pairing prompt.** With `.pair_arrow = true`, when the Muse app asks for the talk button, a white
 arrow points at the blue button from just inside the rim, with "Press to pair" under it
@@ -422,6 +424,7 @@ stopwatch-muse-gadget/
 │   ├── position-options.png # the character 0–60 px lower under the tape
 │   ├── quality-options.png  # clip sizes and JPEG qualities compared
 │   ├── pair-arrow-mockup.png # the pairing prompt's arrow at the blue button
+│   ├── reply-layout-mockup.png # a reply page with the character small at the top
 │   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
