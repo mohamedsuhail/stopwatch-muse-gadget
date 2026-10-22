@@ -18,7 +18,7 @@ On top of the stock SDK, this repo adds:
   (`avatar/character/`), drawn at 384 px. The older pixel-art astronaut is still there
   (`avatar/muse_pixel.c`, `AVATAR=pixel`).
 - **A cleaner screen.** Black and white throughout: white Montserrat text on soft dark bands, and
-  Wi-Fi inside a battery ring at 6 o'clock. There's no state word, since the clips show the state.
+  Wi-Fi inside a battery ring at 2 o'clock. There's no state word, since the clips show the state.
   The rim icons and the top status line are gone, and a worn white painter's-tape "MOBOT" label sits
   across the top-left.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
@@ -318,14 +318,14 @@ Nothing leaves the watch until you hold the blue button.
 
 ### Screen
 
-**Battery and Wi-Fi ring.** A ring at 6 o'clock, under the captions, with the Wi-Fi symbol inside.
-It moved from 3 o'clock to leave the middle of the screen to replies, which stop above it.
+**Battery and Wi-Fi ring.** A ring at 2 o'clock with the Wi-Fi symbol inside, above where reply
+text starts. It's hidden while the pairing arrow shows, since that points the same way.
 
 - **Charge:** the ring's fill on a dark grey track. White above 30%, yellow from 15 to 30%, red
   below 15%, green while charging. Full on USB is white (the charger keeps topping up at 100%).
 - **Wi-Fi symbol:** steady when connected, blinking while joining.
 - **Updates:** once a second. The ring is hidden when the watch can't read the battery.
-- **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 0, 202 }`). Setting it also
+- **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 156, -90 }`). Setting it also
   hides the SDK's top status line (Wi-Fi, Bluetooth and battery text).
 
 **Dots and ticks instead of status lines.** With `.listen_dots = true`, the voice task's status

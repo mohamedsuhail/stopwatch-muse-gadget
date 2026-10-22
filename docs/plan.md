@@ -43,8 +43,14 @@ Done:
       opening the port) between the server rotating it and NVS saving the new one left a stale token,
       so the next boot got HTTP 401 and unpaired. Fixed in the patch: the report happens once and is
       remembered in NVS (`sdk_tok_rptd`), the refresh isn't retried with a token the server may
-      already have retired, and a failed store is logged as an error. Three flashes since kept the
-      pairing. To read the log without resetting the watch, open the port with DTR and RTS low.
+      already have retired, and a failed store is logged as an error. Every flash and reset since kept
+      the pairing: boots no longer refresh the token. (Opening the serial port resets the watch even
+      with DTR and RTS low, but that's now harmless.)
+- [ ] **Spoken replies stopped (Oct 22): Gemini's free daily quota.** The TTS API answered HTTP 429,
+      "limit: 100 requests per day on Tier 1". Each sentence is one request, so a reply costs 2–4,
+      and a day of testing used it up; replies show as text until it resets. Options: a higher
+      tier in Google AI Studio, or fewer requests per reply (the first sentence alone for a quick
+      start, the rest in one request).
 - [x] Avatar as video clips (Oct 22): one clip per state, packed into a new `anims` flash
       partition and played by `avatar/character/muse_pixel.c`. The screen went black and white, and
       the state word is hidden since the clips show the state. Builds; **still to check

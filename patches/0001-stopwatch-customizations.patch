@@ -42,7 +42,7 @@ index 73c8ffa..01f84f3 100644
  if(CONFIG_MUSE_ENABLED)
      # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..b884d37 100644
+index 7330e5e..126c7a3 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
 @@ -1095,7 +1095,18 @@ static const muse_board_t s_board = {
@@ -50,7 +50,7 @@ index 7330e5e..b884d37 100644
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
 -    .frame_ms = 40,
-+    .battery_ring = { LV_ALIGN_CENTER, 0, 202 },     /* 6 o'clock under the captions, the Wi-Fi icon inside it */
++    .battery_ring = { LV_ALIGN_CENTER, 156, -90 },   /* 2 o'clock, the Wi-Fi icon inside it */
 +    .frame_ms = 42,             /* 24 Hz: one tick per frame of the 24 fps clips */
 +    .avatar_px = 384,           /* 6x the 64 px grid, leaving room for the tape and text */
 +    .avatar_dy = 60,            /* out from under the tape */
@@ -3205,7 +3205,7 @@ index ecea3fe..bb12c8c 100644
  void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  /* Copies the caption if it changed since *version; returns true on change. */
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..3402091 100644
+index d0d4e2f..92e1d2d 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -3806,12 +3806,14 @@ index d0d4e2f..3402091 100644
  
      bool speaker = muse_settings_speaker_on();   /* also set from settings, the phone and serial */
      if (s_speaker && (int)speaker != s_shown_speaker) {
-@@ -1442,6 +1742,15 @@ static void update_power(float now)
+@@ -1442,6 +1742,17 @@ static void update_power(float now)
      if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
          lv_label_set_text(s_power_lbl, buf);
      }
 +    if (s_batt_ring) {
-+        lv_obj_set_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN, p.battery_pct < 0 || s_on_settings);
++        /* Out of the way on settings, and of the pairing arrow, which points the same way. */
++        bool arrow = s_pair_arrow && !lv_obj_has_flag(s_pair_arrow, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_set_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN, p.battery_pct < 0 || s_on_settings || arrow);
 +        if (p.battery_pct >= 0) {
 +            int pct = p.battery_pct > 100 ? 100 : p.battery_pct;
 +            uint32_t color = p.charging && pct < 100 ? BATT_GREEN : pct > 30 ? BATT_WHITE : pct >= 15 ? BATT_YELLOW : BATT_RED;
@@ -3822,7 +3824,7 @@ index d0d4e2f..3402091 100644
  }
  
  static void update_status(muse_mode_t mode, float now)
-@@ -1450,13 +1759,18 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1450,13 +1761,18 @@ static void update_status(muse_mode_t mode, float now)
      const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
  
      if (name != s_shown_name) {
@@ -3844,7 +3846,7 @@ index d0d4e2f..3402091 100644
          } else {
              lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
          }
-@@ -1470,7 +1784,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1470,7 +1786,7 @@ static void update_status(muse_mode_t mode, float now)
      if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
          ring = (int)(muse_state_progress() * RING_RANGE);
      } else if (mode == MUSE_MODE_THINKING) {
@@ -3853,7 +3855,7 @@ index d0d4e2f..3402091 100644
      }
      if (s_ring && mode == MUSE_MODE_THINKING) {
          /* Move the indicator rather than rotate the arc: a rotation redraws
-@@ -1498,7 +1812,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1498,7 +1814,7 @@ static void update_status(muse_mode_t mode, float now)
      }
  
      /* The mic's meter; a reply's page has the room while answering. */
@@ -3862,7 +3864,7 @@ index d0d4e2f..3402091 100644
      set_meter_visible(meter);
      if (meter && !s_small) {
          int lit = (int)lroundf(s_level * METER_SEGS);
-@@ -1528,6 +1842,11 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1528,6 +1844,11 @@ static void update_status(muse_mode_t mode, float now)
          if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING) {
              answer = layout;
          }
@@ -3874,7 +3876,7 @@ index d0d4e2f..3402091 100644
      }
      if (answer != s_answer) {
          set_answer(answer);
-@@ -1540,12 +1859,40 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1540,12 +1861,40 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif
