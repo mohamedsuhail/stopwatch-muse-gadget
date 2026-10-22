@@ -334,7 +334,8 @@ shapes, not set in a font:
 
 - **Listening and sending:** three round white dots that build up, one, two, three, 0.4 s each. The
   level meter and the live transcript are hidden.
-- **Note sent to Muse:** a white tick.
+- **Note sent to Muse:** a white tick on a round scrim, for a second; then the dots again until
+  Muse's reply arrives.
 - **Muse's reply, errors and short messages** ("Speaker on") stay as words.
 
 The level meter, shown on boards without `.listen_dots`, is 14 round dots in the state's colour.
