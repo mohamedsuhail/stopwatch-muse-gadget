@@ -1,31 +1,16 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 73c8ffa..40b2905 100644
+index 73c8ffa..0cbe711 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -43,7 +43,12 @@ if(CONFIG_MUSE_ENABLED)
+@@ -43,7 +43,7 @@ if(CONFIG_MUSE_ENABLED)
          "muse_link.c"
          "muse_ble.c")
      if(CONFIG_MUSE_HATCH)
 -        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
 +        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_gemini_tts.c")
-+        # Short spoken phrases played while Muse thinks (copied here by the project's build.sh).
-+        if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/fillers/fillers.pcm")
-+            list(APPEND embed "fillers/fillers.pcm")
-+            set(muse_fillers ON)
-+        endif()
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
      else()
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
-@@ -138,6 +143,9 @@ idf_component_register(
-     REQUIRES esp_driver_gpio esp_driver_i2c
-     PRIV_REQUIRES ${muse_priv_requires}
- )
-+if(muse_fillers)
-+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_HAS_FILLERS=1)
-+endif()
- 
- if(CONFIG_MUSE_ENABLED)
-     # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
 index 7330e5e..872b91e 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
@@ -79,7 +64,7 @@ index 855b101..2157fdc 100644
  #define MUSE_HATCH_NOTE_TAIL "\"}]}"
  #define MUSE_HATCH_WAV_HEADER 44
 diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
-index 2866f5d..21ffa0f 100644
+index 2866f5d..129e753 100644
 --- a/esp32/components/muse/muse_chat_session.cpp
 +++ b/esp32/components/muse/muse_chat_session.cpp
 @@ -67,6 +67,7 @@ extern "C" {
@@ -107,18 +92,15 @@ index 2866f5d..21ffa0f 100644
  };
  
  struct resampler_t {
-@@ -244,6 +248,10 @@ struct turn_t {
+@@ -244,6 +248,7 @@ struct turn_t {
      /* TTS */
      int tts_msg;             /* message being fetched (or shown, speaker off), or -1 */
      bool silent;             /* speaker off: tts_msg is paced by silence, not fetched */
 +    bool gemini;             /* tts_msg is spoken by Gemini (muse_gemini_tts) */
-+    bool filler_chosen;      /* a thinking phrase was picked (or skipped) this turn */
-+    const uint8_t *filler;   /* its PCM still to play, or null */
-+    size_t filler_left;
      uint8_t *mp3;            /* MP3_BUF */
      size_t mp3_len;
      bool mp3_ended;
-@@ -963,6 +971,10 @@ static void turn_finish(void)
+@@ -963,6 +968,10 @@ static void turn_finish(void)
      turn_reset_streams();
      s_turn.phase = P_IDLE;
      s_turn.dict_id = s_turn.chat_id = 0;
@@ -129,7 +111,7 @@ index 2866f5d..21ffa0f 100644
      s_turn.tts_msg = -1;
      s_turn.silent = false;
      s_turn.mp3_len = 0;
-@@ -1009,6 +1021,9 @@ static bool turn_start(uint32_t gen, bool text)
+@@ -1009,6 +1018,9 @@ static bool turn_start(uint32_t gen, bool text)
      s_turn.gen = gen;
      s_turn.text = text;
      s_turn.tts_msg = -1;
@@ -139,7 +121,7 @@ index 2866f5d..21ffa0f 100644
      memset(s_marks, 0, sizeof(s_marks));
      s_reply_shown[0] = '\0';
      s_turn.start_us = now_us();
-@@ -1508,6 +1523,157 @@ static void on_chat_ack(stream_t *s)
+@@ -1508,6 +1520,157 @@ static void on_chat_ack(stream_t *s)
  
  /* ---- Turn: speech ---- */
  
@@ -297,7 +279,7 @@ index 2866f5d..21ffa0f 100644
  static void start_tts(void)
  {
      if (s_turn.tts_msg >= 0) {
-@@ -1515,7 +1681,9 @@ static void start_tts(void)
+@@ -1515,7 +1678,9 @@ static void start_tts(void)
      }
      for (int i = 0; i < s_turn.nmsgs; i++) {
          msg_t &m = s_turn.msgs[i];
@@ -308,7 +290,7 @@ index 2866f5d..21ffa0f 100644
              continue;
          }
          /*
-@@ -1534,9 +1702,24 @@ static void start_tts(void)
+@@ -1534,9 +1699,24 @@ static void start_tts(void)
           * and finishes the message once it's drained.
           */
          m.pcm_start = s_turn.pcm_out;
@@ -334,93 +316,10 @@ index 2866f5d..21ffa0f 100644
          s_turn.silent = true;
          ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
          show_reply_start(m);
-@@ -1588,12 +1771,161 @@ static void pace_silently(void)
+@@ -1588,12 +1768,75 @@ static void pace_silently(void)
      }
  }
  
-+/*
-+ * Thinking phrases ("Hmm, let me think.", "One moment."...): when Muse hasn't
-+ * started its reply FILLER_AFTER_US after the release, one plays so the wait
-+ * isn't silent. A random one each time, never one of the last few, so it
-+ * doesn't get repetitive. fillers.pcm: u32 count, then (u32 offset, u32
-+ * bytes) per phrase, then 16 kHz mono s16le PCM (sounds/make_fillers.py).
-+ */
-+#if MUSE_HAS_FILLERS
-+extern const uint8_t s_fillers_start[] asm("_binary_fillers_pcm_start");
-+extern const uint8_t s_fillers_end[] asm("_binary_fillers_pcm_end");
-+#define FILLER_AFTER_US (1200 * 1000LL)
-+#define FILLER_RECENT 3
-+
-+static uint32_t rd32(const uint8_t *p)
-+{
-+    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
-+}
-+
-+static void choose_filler(void)
-+{
-+    static int recent[FILLER_RECENT] = { -1, -1, -1 };
-+    static int next;
-+    size_t size = s_fillers_end - s_fillers_start;
-+    uint32_t count = size >= 4 ? rd32(s_fillers_start) : 0;
-+    if (!count || size < 4 + 8 * count) {
-+        return;
-+    }
-+    int pick = -1;
-+    for (int tries = 0; tries < 16 && pick < 0; tries++) {
-+        int c = (int)(esp_random() % count);
-+        bool used = false;
-+        for (int i = 0; i < FILLER_RECENT; i++) {
-+            used |= recent[i] == c;
-+        }
-+        if (!used || count <= FILLER_RECENT) {
-+            pick = c;
-+        }
-+    }
-+    if (pick < 0) {
-+        return;
-+    }
-+    recent[next] = pick;
-+    next = (next + 1) % FILLER_RECENT;
-+    uint32_t off = rd32(s_fillers_start + 4 + 8 * pick), len = rd32(s_fillers_start + 8 + 8 * pick);
-+    if (off + len > size) {
-+        return;
-+    }
-+    s_turn.filler = s_fillers_start + off;
-+    s_turn.filler_left = len & ~(size_t)1;
-+    ESP_LOGI(TAG, "thinking phrase %d while Muse replies", pick + 1);
-+}
-+#endif
-+
-+/* Starts a thinking phrase once Muse has been quiet a moment, and feeds it on. True while it's playing. */
-+static bool play_filler(void)
-+{
-+#if MUSE_HAS_FILLERS
-+    if (!s_turn.filler_chosen && s_marks[M_RELEASE] && gemini_ok()) {
-+        bool replied = s_turn.nmsgs && s_turn.msgs[0].len;
-+        if (replied) {
-+            s_turn.filler_chosen = true;   /* Muse was quick: no phrase needed */
-+        } else if (now_us() - s_marks[M_RELEASE] >= FILLER_AFTER_US) {
-+            s_turn.filler_chosen = true;
-+            choose_filler();
-+        }
-+    }
-+    while (s_turn.filler_left) {
-+        size_t room = xStreamBufferSpacesAvailable(s_out) & ~(size_t)1;
-+        if (!room) {
-+            return true;
-+        }
-+        size_t n = s_turn.filler_left < room ? s_turn.filler_left : room;
-+        if (s_turn.gen == s_gen.load()) {
-+            xStreamBufferSend(s_out, s_turn.filler, n, 0);
-+        }
-+        s_turn.filler += n;
-+        s_turn.filler_left -= n;
-+        s_turn.pcm_out += n / 2;
-+    }
-+#endif
-+    return false;
-+}
-+
 +/* Moves Gemini's PCM on to the voice task while the reply buffer has room. */
 +static void pump_gemini(void)
 +{
@@ -483,9 +382,6 @@ index 2866f5d..21ffa0f 100644
  /* Decodes buffered MP3 while the reply buffer has room. */
  static void decode(void)
  {
-+    if (play_filler()) {
-+        return;   /* the reply's speech follows the phrase, never mixes with it */
-+    }
      if (s_turn.tts_msg < 0) {
          return;
      }
@@ -496,7 +392,7 @@ index 2866f5d..21ffa0f 100644
      if (s_turn.silent) {
          pace_silently();
          return;
-@@ -2058,6 +2390,7 @@ extern "C" void muse_hatch_start(void)
+@@ -2058,6 +2301,7 @@ extern "C" void muse_hatch_start(void)
      }
      s_in = xStreamBufferCreateWithCaps(IN_BYTES, 1, MALLOC_CAP_SPIRAM);
      s_out = xStreamBufferCreateWithCaps(OUT_BYTES, 1, MALLOC_CAP_SPIRAM);

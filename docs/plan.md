@@ -27,9 +27,7 @@ Done:
   - Text-to-first-sound went from 3.3–3.8 s to 1.0–1.5 s. Details in the README.
 - [x] Voice notes ask Muse for short spoken-style answers (`MUSE_VOICE_NOTE_STYLE`). The Gemini
       connection opens on wake (red button); resumed sessions take ~50 ms.
-- [x] Thinking phrases while Muse works (10, random, no repeats of the last 3).
 - [x] Spoken text is cleaned of list numbers, bullets, markdown and emoji (Muse ignored "no lists").
-- [ ] Maybe: a second phrase partway through a long wait (one turn took Muse 12.8 s).
 - [x] Custom avatar: the toy astronaut, at 448 px (7×), centred on the round screen.
 - [x] Battery work:
   - Auto-sleep is 30 s.
@@ -40,6 +38,9 @@ Done:
 - [x] Blue (talk) and yellow (speaker on/off) work as mapped on the device. Red power-off and wake are still to test (below).
 
 Decided against:
+
+- **Thinking phrases while Muse works.** We tried them ("Hmm, let me think.", 10 random phrases),
+  but they broke the flow of the conversation, so they were removed (Oct 22).
 
 - **Mic only while talking.** The mic runs while the screen is on, into a 320 ms in-memory ring
   buffer, so the first word isn't clipped. Nothing leaves the watch until the talk button is held.

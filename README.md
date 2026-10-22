@@ -53,8 +53,7 @@ This does four things:
 
 1. Clones the SDK at the pinned commit into `.sdk/muse-gadget-sdk` (override with `SDK_DIR`).
 2. Applies every `patches/*.patch` to it. A patch that's already applied is skipped.
-3. Copies `avatar/muse_pixel.c` into the SDK's custom-avatar slot, and `sounds/fillers.pcm` into
-   `components/muse/fillers/`.
+3. Copies `avatar/muse_pixel.c` into the SDK's custom-avatar slot.
 4. Runs `tools/muse/board.sh build stopwatch` from the SDK's `esp32/` directory.
 
 `board.sh build stopwatch` sets the IDF target to `esp32s3` and
@@ -205,15 +204,6 @@ instruction, so the watch cleans the text before speaking it (`speakable()` in
 
 The screen captions still show Muse's text as written.
 
-**Thinking phrases.** If Muse hasn't started replying 1.2 s after you let go of talk, the watch says
-a short phrase in the same voice, such as "Hmm, let me think.", "One moment." or "Good question!".
-
-- **Variety:** there are 10 phrases, picked at random, never one of the last 3.
-- **No delay:** they're stored in the firmware, so they need no network or API calls.
-- **Regenerating them:** `sounds/make_fillers.py` makes them with your Gemini key.
-  `sounds/preview.wav` plays all 10.
-- **Quick answers:** a reply that's already arriving gets no phrase.
-
 **Ready on wake.** Pressing red to wake the watch opens the Gemini connection straight away. If
 Wi-Fi is still rejoining after a nap, the watch waits up to 10 s for it. The handshake is then done
 before you press talk. A resumed session took 54 ms, against about 2 s for a full handshake.
@@ -294,10 +284,6 @@ stopwatch-muse-gadget/
 │   └── flash.sh          # factory backup + flash
 ├── patches/
 │   └── 0001-stopwatch-customizations.patch   # Gemini TTS, 448 px avatar, battery, wake
-├── sounds/
-│   ├── fillers.pcm       # the 10 thinking phrases (16 kHz PCM), built into the firmware
-│   ├── make_fillers.py   # regenerates them with Gemini (needs ~/.config/stopwatch/gemini_key)
-│   └── preview.wav       # all 10, to listen to
 ├── avatar/
 │   ├── muse_pixel.c      # the astronaut avatar renderer
 │   ├── preview.png       # every state, enlarged
