@@ -27,8 +27,9 @@ Done:
   - Text-to-first-sound went from 3.3–3.8 s to 1.0–1.5 s. Details in the README.
 - [x] Voice notes ask Muse for short spoken-style answers (`MUSE_VOICE_NOTE_STYLE`). The Gemini
       connection opens on wake (red button); resumed sessions take ~50 ms.
-- [ ] Maybe: a short pre-recorded "let me think" sound if Muse's text takes over ~1.5 s. Most of
-      the remaining wait is Muse thinking.
+- [x] Thinking phrases while Muse works (10, random, no repeats of the last 3).
+- [x] Spoken text is cleaned of list numbers, bullets, markdown and emoji (Muse ignored "no lists").
+- [ ] Maybe: a second phrase partway through a long wait (one turn took Muse 12.8 s).
 - [x] Custom avatar: the toy astronaut, at 448 px (7×), centred on the round screen.
 - [x] Battery work:
   - Auto-sleep is 30 s.

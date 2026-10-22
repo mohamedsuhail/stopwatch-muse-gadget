@@ -84,6 +84,12 @@ apply_patches() {
         cp "$REPO_ROOT/avatar/muse_pixel.c" "$SDK_DIR/esp32/components/muse/avatar/muse_pixel.c"
         log "using avatar/muse_pixel.c"
     fi
+    # Thinking phrases played while Muse works on a reply (sounds/make_fillers.py makes them).
+    if [ -f "$REPO_ROOT/sounds/fillers.pcm" ]; then
+        mkdir -p "$SDK_DIR/esp32/components/muse/fillers"
+        cp "$REPO_ROOT/sounds/fillers.pcm" "$SDK_DIR/esp32/components/muse/fillers/fillers.pcm"
+        log "using sounds/fillers.pcm"
+    fi
 }
 
 # --- ESP-IDF v6.0.1 -----------------------------------------------------------
