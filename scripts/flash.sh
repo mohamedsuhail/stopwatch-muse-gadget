@@ -188,25 +188,30 @@ ensure_esptool
 
 backup_factory "$PORT"
 
+# The character's clips go in their own partition (partitions_stopwatch.csv,
+# "anims" at 0x830000), written only when what's there differs. They go first,
+# leaving the chip in its bootloader (--after no-reset): the firmware flash
+# below then resets it once. Reset again by a later esptool run, a firmware
+# that had just started booting could be cut off mid token refresh, after
+# Muse's server had replaced the token but before the watch saved the new one,
+# and the next boot is rejected and unpairs.
+ANIMS="$REPO_ROOT/avatar/character/anims.pack"
+ANIMS_OFFSET=0x830000
+if [ -f "$ANIMS" ]; then
+    if "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" --after no-reset verify-flash "$ANIMS_OFFSET" "$ANIMS" >/dev/null 2>&1; then
+        log "animations already up to date"
+    else
+        log "writing animations ($(( $(wc -c < "$ANIMS") / 1024 )) KB) to $ANIMS_OFFSET"
+        "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b 460800 --after no-reset write-flash "$ANIMS_OFFSET" "$ANIMS"
+    fi
+fi
+
 cd "$SDK_DIR/esp32"
 log "flashing: tools/muse/board.sh flash $BOARD $PORT"
 if [ -x tools/muse/board.sh ]; then
     tools/muse/board.sh flash "$BOARD" "$PORT"
 else
     bash tools/muse/board.sh flash "$BOARD" "$PORT"
-fi
-
-# The character's clips go in their own partition (partitions_stopwatch.csv,
-# "anims" at 0x830000). Written only when what's there differs.
-ANIMS="$REPO_ROOT/avatar/character/anims.pack"
-ANIMS_OFFSET=0x830000
-if [ -f "$ANIMS" ]; then
-    if "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" verify-flash "$ANIMS_OFFSET" "$ANIMS" >/dev/null 2>&1; then
-        log "animations already up to date"
-    else
-        log "writing animations ($(( $(wc -c < "$ANIMS") / 1024 )) KB) to $ANIMS_OFFSET"
-        "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" -b 460800 write-flash "$ANIMS_OFFSET" "$ANIMS"
-    fi
 fi
 
 log "flash succeeded"

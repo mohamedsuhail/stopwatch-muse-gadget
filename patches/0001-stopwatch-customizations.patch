@@ -42,21 +42,24 @@ index 73c8ffa..01f84f3 100644
  if(CONFIG_MUSE_ENABLED)
      # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..8afff14 100644
+index 7330e5e..4932475 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-@@ -1095,7 +1095,14 @@ static const muse_board_t s_board = {
+@@ -1095,7 +1095,16 @@ static const muse_board_t s_board = {
      .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
+-    .frame_ms = 40,
 +    .battery_ring = { LV_ALIGN_CENTER, 180, 0 },     /* 3 o'clock, the Wi-Fi icon inside it */
-     .frame_ms = 40,
++    .frame_ms = 42,             /* 24 Hz: one tick per frame of the 24 fps clips */
 +    .avatar_px = 384,           /* 6x the 64 px grid, leaving room for the tape and text */
 +    .avatar_dy = 60,            /* out from under the tape */
 +    .power_wakes_only = true,   /* only red (power) and blue (talk) wake it */
 +    .hide_rim_hints = true,     /* a clean screen: no mic/speaker/power icons */
 +    .tape_label = true,         /* MOBOT on painter's tape, top-left */
++    .pair_arrow = true,         /* pairing: an arrow at the blue button */
 +    .hide_state_label = true,   /* the character's animation says what it's doing */
++    .listen_dots = true,        /* dots while listening, not a timer */
      .init = init,
      .display_start = display_start,
      .display_lock = display_lock,
@@ -1556,11 +1559,26 @@ index 0000000..0983a7e
 +
 +#endif /*#if MUSE_FONT_BOLD_20*/
 +
+diff --git a/esp32/components/muse/idf_component.yml b/esp32/components/muse/idf_component.yml
+index a3b618e..b50ceb1 100644
+--- a/esp32/components/muse/idf_component.yml
++++ b/esp32/components/muse/idf_component.yml
+@@ -30,6 +30,10 @@ dependencies:
+     version: "0.6.4"
+     rules:
+       - if: "$CONFIG{MUSE_BOARD_ID} in [\"ostb_echoear_2st\", \"waveshare_s3_175c\", \"waveshare_s3_175\", \"waveshare_s3_216\", \"waveshare_s3_185c\", \"aipi\", \"m5stack_cardputer_adv\", \"sensecap_watcher\", \"m5stack_sticks3\", \"m5stack_stickc_plus2\", \"m5stack_stopwatch\", \"fnk0104b\", \"vn_s3_183\", \"ai_passport\", \"waveshare_s3_lcd128\"]"
++  espressif/esp_new_jpeg:   # the StopWatch's avatar clips (SIMD JPEG decoding)
++    version: ">=1.0.1"
++    rules:
++      - if: "$CONFIG{MUSE_BOARD_ID} == \"m5stack_stopwatch\""
+   78/esp_lcd_nv3023:
+     version: "1.0.1"
+     rules:
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index ddf486b..db2dac7 100644
+index ddf486b..4f82cd9 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
-@@ -88,6 +88,19 @@ typedef struct {
+@@ -88,6 +88,25 @@ typedef struct {
      bool flat_menu_hints;
      int frame_ms;           /* face animation period */
      int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
@@ -1569,8 +1587,14 @@ index ddf486b..db2dac7 100644
 +    bool power_wakes_only;
 +    /* rim_controls boards: keep the rim's button icons (mic, speaker, power) hidden. */
 +    bool hide_rim_hints;
++    /* Listening shows animated dots instead of "LISTENING 2.3s" and the level meter, and the
++     * edge ring is a solid white circle (not a spinner) while Muse works on a reply. */
++    bool listen_dots;
 +    /* No state word ("Listening", "Thinking"...) under the top edge: the avatar shows the state. */
 +    bool hide_state_label;
++    /* When the Muse app asks for the talk button to pair, an arrow at it (talk_hint's spot)
++     * and "Press to pair", rather than a card that names the button. */
++    bool pair_arrow;
 +    /* The MOBOT tape label across the top-left, like a sticker on the glass (tape.rgb565a8). */
 +    bool tape_label;
 +    /* A battery ring (charge as its fill, colour by level, green while charging) at this spot,
@@ -2972,6 +2996,23 @@ index 5a60abf..7e47c61 100644
              muse_board->wait_buttons(napping ? NAP_WAIT_MS : REST_WAIT_MS);
          } else {
              vTaskDelay(pdMS_TO_TICKS(paused ? REST_POLL_MS : POLL_MS));
+diff --git a/esp32/components/muse/muse_pixel.h b/esp32/components/muse/muse_pixel.h
+index fe603d8..cbb524e 100644
+--- a/esp32/components/muse/muse_pixel.h
++++ b/esp32/components/muse/muse_pixel.h
+@@ -55,3 +55,12 @@ void muse_pixel_set_size(int px);
+  * image never has to exist in RAM.
+  */
+ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1);
++
++/*
++ * Optional: the part of the blown-up frame that changed since the last call,
++ * in screen pixels relative to the canvas. Returns 1 with the area, 0 when
++ * nothing changed, or -1 (the default) to have the UI find changes itself by
++ * sampling a pixel per grid cell, which suits pixel art but misses changes
++ * between the samples in video.
++ */
++int muse_pixel_dirty(int *x1, int *y1, int *x2, int *y2);
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
 index 4b0dda9..9ac91f3 100644
 --- a/esp32/components/muse/muse_settings.c
@@ -3142,8 +3183,22 @@ index 6a372ac..571658d 100644
  }
  
  /* ---------- Battery ---------- */
+diff --git a/esp32/components/muse/muse_state.h b/esp32/components/muse/muse_state.h
+index ecea3fe..bb12c8c 100644
+--- a/esp32/components/muse/muse_state.h
++++ b/esp32/components/muse/muse_state.h
+@@ -58,6 +58,9 @@ float muse_state_progress(void);
+ 
+ /* Room for a page of reply text; longer captions are cut short. */
+ #define MUSE_CAPTION_MAX 400
++/* Captions that boards with listen_dots draw as marks rather than words (muse_ui.c). */
++#define MUSE_CAPTION_DOTS "\x01"   /* working on it: dots that build up */
++#define MUSE_CAPTION_SENT "\x02"   /* Muse has the note: a tick */
+ 
+ void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+ /* Copies the caption if it changed since *version; returns true on change. */
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..433a43d 100644
+index d0d4e2f..d28cbb7 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -3179,7 +3234,15 @@ index d0d4e2f..433a43d 100644
  #define COLOR_LIT 0xf2efff
  #define SETTINGS_TICK_S 0.25f
  
-@@ -132,6 +133,15 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
+@@ -115,6 +116,7 @@ static lv_obj_t *s_ble_icon;
+ static lv_obj_t *s_cover;
+ static lv_obj_t *s_pair;
+ static lv_obj_t *s_pair_code;
++static lv_obj_t *s_pair_arrow;   /* muse_board->pair_arrow: the arrow and its words */
+ static lv_obj_t *s_pair_title;
+ static lv_obj_t *s_pair_hint;
+ static lv_obj_t *s_canvas;
+@@ -132,7 +134,19 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
  static lv_obj_t *s_state_lbl;
  static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
  static lv_obj_t *s_power_lbl;
@@ -3189,13 +3252,17 @@ index d0d4e2f..433a43d 100644
 +static bool s_on_settings;      /* the settings page is showing: no tape or ring */
 +#define BATT_RING_PX 46
 +#define BATT_WHITE 0xffffff
-+#define BATT_GREEN 0x3ddc84   /* charging */
++#define BATT_GREEN 0x3ddc84   /* charging, until full (it tops up on USB at 100% too) */
 +#define BATT_YELLOW 0xffc83d
 +#define BATT_RED 0xff4d4d
  static lv_obj_t *s_caption_lbl;
++static lv_obj_t *s_marks;        /* muse_board->listen_dots: marks in the caption's place */
++static lv_obj_t *s_mark_dots[3], *s_mark_tick;
++static int s_mark;               /* shown: 0 none, 1 dots, 2 tick */
  static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
  static lv_obj_t *s_meter[METER_SEGS];
-@@ -190,6 +200,56 @@ static int s_big_y;             /* Muse's centre at full size */
+ static lv_obj_t *s_speaker;
+@@ -190,6 +204,56 @@ static int s_big_y;             /* Muse's centre at full size */
  static int s_muse_y;            /* and now */
  static int s_from_px, s_from_y, s_to_px, s_to_y;
  
@@ -3252,7 +3319,33 @@ index d0d4e2f..433a43d 100644
  static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
      [MUSE_MODE_BOOT] = "WAKING UP",
      [MUSE_MODE_IDLE] = "READY",
-@@ -502,24 +562,50 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
+@@ -329,8 +393,25 @@ static int32_t rect_cells(const lv_area_t *r)
+     return lv_area_get_width(r) * lv_area_get_height(r);
+ }
+ 
++__attribute__((weak)) int muse_pixel_dirty(int *x1, int *y1, int *x2, int *y2)
++{
++    (void)x1, (void)y1, (void)x2, (void)y2;
++    return -1;
++}
++
+ static void invalidate_muse(void)
+ {
++    int dx1, dy1, dx2, dy2;
++    int dirty = muse_pixel_dirty(&dx1, &dy1, &dx2, &dy2);
++    if (dirty >= 0) {
++        if (dirty) {
++            lv_area_t at;
++            lv_obj_get_coords(s_canvas, &at);
++            lv_area_t a = { at.x1 + dx1, at.y1 + dy1, at.x1 + dx2, at.y1 + dy2 };
++            lv_obj_invalidate_area(s_canvas, &a);
++        }
++        return;
++    }
+     if (!s_cells) {
+         lv_obj_invalidate(s_canvas);
+         return;
+@@ -502,24 +583,50 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
      return s_small ? compact : full;
  }
  
@@ -3312,7 +3405,7 @@ index d0d4e2f..433a43d 100644
  }
  
  static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
-@@ -667,7 +753,7 @@ static void set_answer(int which)
+@@ -667,7 +774,7 @@ static void set_answer(int which)
          lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
      }
      if (l) {
@@ -3321,7 +3414,7 @@ index d0d4e2f..433a43d 100644
          lv_obj_align(s_reply_lbl, LV_ALIGN_CENTER, 0, l->top + l->h / 2);
          lv_obj_set_style_text_align(s_reply_lbl, l->align, 0);
      }
-@@ -794,6 +880,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -794,6 +901,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
      lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
      lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
      lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -3329,7 +3422,7 @@ index d0d4e2f..433a43d 100644
  
      if (muse_board->touch && !muse_board->rim_controls) {
          build_speaker(face, spk_x, spk_y);
-@@ -801,7 +888,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -801,7 +909,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
  
      /* Out of the way while a page is up: the mode name, where Muse was. */
      lv_obj_update_layout(face);
@@ -3340,7 +3433,7 @@ index d0d4e2f..433a43d 100644
      s_answers[ANSWER_READ].hides[1] = s_name_lbl;   /* the reply takes the top too */
      add_hides(&s_answers[ANSWER_READ], 2);
      add_hides(&s_answers[ANSWER_HEARD], 0);
-@@ -897,7 +986,7 @@ static void build_screen(void)
+@@ -897,7 +1007,7 @@ static void build_screen(void)
       * whose blank bottom rows can tuck in behind the meter.
       */
      int ring_in = (s_w < s_h ? s_w : s_h) / 2 - 10;   /* the ring's inner edge */
@@ -3349,7 +3442,7 @@ index d0d4e2f..433a43d 100644
      int cap_bottom = 179;                              /* a 466 px circle's; fine for rectangles */
      if (muse_board->round) {
          cap_bottom = (int)sqrtf((float)(ring_in * ring_in - CAPTION_W * CAPTION_W / 4)) - 3;
-@@ -906,6 +995,14 @@ static void build_screen(void)
+@@ -906,6 +1016,14 @@ static void build_screen(void)
      int meter_y = cap_top - 6 - METER_SEG_PX / 2;
      int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
      s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
@@ -3364,7 +3457,7 @@ index d0d4e2f..433a43d 100644
  
      /* The character. */
      muse_image_init();
-@@ -933,24 +1030,31 @@ static void build_screen(void)
+@@ -933,24 +1051,31 @@ static void build_screen(void)
      s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
@@ -3401,7 +3494,7 @@ index d0d4e2f..433a43d 100644
          lv_label_set_long_mode(s_state_lbl, LV_LABEL_LONG_MODE_DOTS);
          lv_label_set_long_mode(s_name_lbl, LV_LABEL_LONG_MODE_DOTS);
      }
-@@ -984,7 +1088,8 @@ static void build_screen(void)
+@@ -984,11 +1109,40 @@ static void build_screen(void)
          return;
      }
      /* Fixed height: a longer caption ends in dots rather than growing into the ring. */
@@ -3411,7 +3504,47 @@ index d0d4e2f..433a43d 100644
      lv_obj_set_style_text_line_space(s_caption_lbl, CAPTION_LINE_SPACE, 0);
      lv_label_set_long_mode(s_caption_lbl, LV_LABEL_LONG_MODE_DOTS);
      lv_obj_align(s_caption_lbl, LV_ALIGN_CENTER, 0, cap_top + cap_h / 2);
-@@ -1010,6 +1115,9 @@ static void build_screen(void)
+ 
++    /* Marks for the voice task's MUSE_CAPTION_DOTS and _SENT, drawn rather than
++     * set in a font: three round dots that build up while it listens and
++     * sends, and a tick once Muse has the note. */
++    if (muse_board->listen_dots && !s_small) {
++        s_marks = lv_obj_create(face);
++        lv_obj_remove_style_all(s_marks);
++        lv_obj_set_size(s_marks, 96, 40);
++        lv_obj_remove_flag(s_marks, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
++        lv_obj_align(s_marks, LV_ALIGN_CENTER, 0, cap_top + cap_h / 2);
++        lv_obj_add_flag(s_marks, LV_OBJ_FLAG_HIDDEN);
++        for (int i = 0; i < 3; i++) {
++            lv_obj_t *dot = lv_obj_create(s_marks);
++            lv_obj_remove_style_all(dot);
++            lv_obj_set_size(dot, 12, 12);
++            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
++            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
++            lv_obj_set_style_bg_color(dot, lv_color_white(), 0);
++            lv_obj_align(dot, LV_ALIGN_CENTER, (i - 1) * 26, 0);
++            s_mark_dots[i] = dot;
++        }
++        static const lv_point_precise_t tick[] = { { 34, 21 }, { 44, 31 }, { 62, 11 } };
++        s_mark_tick = lv_line_create(s_marks);
++        lv_line_set_points(s_mark_tick, tick, 3);
++        lv_obj_set_style_line_width(s_mark_tick, 6, 0);
++        lv_obj_set_style_line_rounded(s_mark_tick, true, 0);
++        lv_obj_set_style_line_color(s_mark_tick, lv_color_white(), 0);
++    }
++
+     /* Chunky level meter. */
+     int span = METER_SEGS * (METER_SEG_PX + METER_GAP_PX) - METER_GAP_PX;
+     for (int i = 0; i < METER_SEGS; i++) {
+@@ -996,6 +1150,7 @@ static void build_screen(void)
+         lv_obj_remove_style_all(seg);
+         lv_obj_remove_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
+         lv_obj_set_size(seg, METER_SEG_PX, METER_SEG_PX);
++        lv_obj_set_style_radius(seg, LV_RADIUS_CIRCLE, 0);   /* dots */
+         lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
+         lv_obj_set_style_bg_color(seg, lv_color_hex(COLOR_METER_OFF), 0);
+         int x = -span / 2 + i * (METER_SEG_PX + METER_GAP_PX) + METER_SEG_PX / 2;
+@@ -1010,6 +1165,9 @@ static void build_screen(void)
  static void on_cover_event(lv_event_t *e)
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
@@ -3421,7 +3554,7 @@ index d0d4e2f..433a43d 100644
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
          muse_state_set_asleep(false);
-@@ -1109,9 +1217,19 @@ static void update_control_hints(muse_mode_t mode)
+@@ -1109,9 +1267,19 @@ static void update_control_hints(muse_mode_t mode)
      if (!s_ptt_hint) return;
      /* Don't obscure settings rows/keyboards with floating physical icons. */
      bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
@@ -3444,7 +3577,7 @@ index d0d4e2f..433a43d 100644
      static int last_mode = -1;
      if ((int)mode != last_mode) {
          color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
-@@ -1173,6 +1291,53 @@ static void build_overlays(void)
+@@ -1173,6 +1341,92 @@ static void build_overlays(void)
          update_control_hints(MUSE_MODE_BOOT);
      }
  
@@ -3495,10 +3628,49 @@ index d0d4e2f..433a43d 100644
 +    }
 +#endif
 +
++    /* The Muse app's ask for the talk button, as an arrow at it: a shaft
++     * pointing the way of talk_hint's spot and ending near the rim, just inside
++     * the button, a two-stroke head, and "Press to pair" under its tail on a
++     * scrim (avatar/pair-arrow-mockup.png). */
++    if (muse_board->pair_arrow && !s_small) {
++        static lv_point_precise_t shaft[2], head[3];
++        float tx = muse_board->talk_hint.x, ty = muse_board->talk_hint.y;   /* from the centre */
++        float len = sqrtf(tx * tx + ty * ty);
++        float ux = tx / len, uy = ty / len;   /* outwards, towards the button */
++        float reach = (s_w < s_h ? s_w : s_h) / 2 - 33;   /* the tip, 33 px in from the rim */
++        float tipx = s_w / 2 + ux * reach, tipy = s_h / 2 + uy * reach;
++        float tailx = tipx - ux * 76, taily = tipy - uy * 76;
++        shaft[0] = (lv_point_precise_t){ tailx, taily };
++        shaft[1] = (lv_point_precise_t){ tipx, tipy };
++        float c = cosf(0.6f), s = sinf(0.6f);   /* the head's strokes, 34 degrees off the shaft */
++        head[0] = (lv_point_precise_t){ tipx + 22 * (-ux * c + uy * s), tipy + 22 * (-ux * s - uy * c) };
++        head[1] = shaft[1];
++        head[2] = (lv_point_precise_t){ tipx + 22 * (-ux * c - uy * s), tipy + 22 * (ux * s - uy * c) };
++
++        s_pair_arrow = lv_obj_create(lv_layer_top());
++        lv_obj_remove_style_all(s_pair_arrow);
++        lv_obj_set_size(s_pair_arrow, s_w, s_h);
++        lv_obj_remove_flag(s_pair_arrow, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
++        lv_obj_add_flag(s_pair_arrow, LV_OBJ_FLAG_HIDDEN);
++        const lv_point_precise_t *parts[] = { shaft, head };
++        const uint32_t counts[] = { 2, 3 };
++        for (int i = 0; i < 2; i++) {
++            lv_obj_t *line = lv_line_create(s_pair_arrow);
++            lv_line_set_points(line, parts[i], counts[i]);
++            lv_obj_set_style_line_width(line, 7, 0);
++            lv_obj_set_style_line_rounded(line, true, 0);
++            lv_obj_set_style_line_color(line, lv_color_white(), 0);
++        }
++        lv_obj_t *words = make_label(s_pair_arrow, &muse_font_bold_20, 0xffffff);
++        lv_label_set_text(words, "Press to pair");
++        scrim(words);
++        lv_obj_align(words, LV_ALIGN_CENTER, (int)(tailx - s_w / 2) + 14, (int)(taily - s_h / 2) + 36);
++    }
++
      /* BLE pairing code, or the Muse app's ask for the talk button: a centred
       * column in one typeface, the code large. The small card grows with the hint. */
      s_pair = lv_obj_create(lv_layer_top());
-@@ -1302,7 +1467,7 @@ static void update_chrome(float now)
+@@ -1302,7 +1556,7 @@ static void update_chrome(float now)
          int shown = page * 2 + subpage;
          if (shown != s_shown_page) {
              for (int i = 0; i < 2; i++) {
@@ -3507,7 +3679,7 @@ index d0d4e2f..433a43d 100644
                  lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
              }
              s_shown_page = shown;
-@@ -1318,6 +1483,9 @@ static void update_chrome(float now)
+@@ -1318,6 +1572,9 @@ static void update_chrome(float now)
      if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
          lv_label_set_text(s_wifi_icon, wifi);
      }
@@ -3517,7 +3689,7 @@ index d0d4e2f..433a43d 100644
      s_idle_name = idle_name(w.state);
      muse_ble_status_t b;
      muse_ble_status(&b);
-@@ -1337,7 +1505,7 @@ static void update_chrome(float now)
+@@ -1337,7 +1594,7 @@ static void update_chrome(float now)
       * read layout unhides it on the way out. A narrow screen gets the hex tail
       * on its own, which is the part that differs between two of them, rather
       * than a head that ends in dots before it gets there. */
@@ -3526,7 +3698,20 @@ index d0d4e2f..433a43d 100644
      int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
      const char *shown = paired ? "" : b.name;
  #if LV_USE_SNAPSHOT
-@@ -1442,6 +1610,15 @@ static void update_power(float now)
+@@ -1376,7 +1633,11 @@ static void update_chrome(float now)
+             lv_label_set_text(s_pair_hint, hint);
+         }
+     }
+-    lv_obj_set_flag(s_pair, LV_OBJ_FLAG_HIDDEN, !b.passkey && !confirm);
++    bool arrow = s_pair_arrow && confirm;   /* the arrow asks instead of the card */
++    lv_obj_set_flag(s_pair, LV_OBJ_FLAG_HIDDEN, (!b.passkey && !confirm) || arrow);
++    if (s_pair_arrow && arrow == lv_obj_has_flag(s_pair_arrow, LV_OBJ_FLAG_HIDDEN)) {
++        lv_obj_set_flag(s_pair_arrow, LV_OBJ_FLAG_HIDDEN, !arrow);
++    }
+ 
+     bool speaker = muse_settings_speaker_on();   /* also set from settings, the phone and serial */
+     if (s_speaker && (int)speaker != s_shown_speaker) {
+@@ -1442,6 +1703,15 @@ static void update_power(float now)
      if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
          lv_label_set_text(s_power_lbl, buf);
      }
@@ -3534,7 +3719,7 @@ index d0d4e2f..433a43d 100644
 +        lv_obj_set_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN, p.battery_pct < 0 || s_on_settings);
 +        if (p.battery_pct >= 0) {
 +            int pct = p.battery_pct > 100 ? 100 : p.battery_pct;
-+            uint32_t color = p.charging ? BATT_GREEN : pct > 30 ? BATT_WHITE : pct >= 15 ? BATT_YELLOW : BATT_RED;
++            uint32_t color = p.charging && pct < 100 ? BATT_GREEN : pct > 30 ? BATT_WHITE : pct >= 15 ? BATT_YELLOW : BATT_RED;
 +            lv_arc_set_value(s_batt_arc, pct);
 +            lv_obj_set_style_arc_color(s_batt_arc, lv_color_hex(color), LV_PART_INDICATOR);
 +        }
@@ -3542,7 +3727,7 @@ index d0d4e2f..433a43d 100644
  }
  
  static void update_status(muse_mode_t mode, float now)
-@@ -1450,11 +1627,13 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1450,13 +1720,18 @@ static void update_status(muse_mode_t mode, float now)
      const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
  
      if (name != s_shown_name) {
@@ -3556,18 +3741,164 @@ index d0d4e2f..433a43d 100644
 +        /* White on its scrim; the mode's accent stays on the ring and bars. */
 +        lv_obj_set_style_text_color(s_state_lbl, lv_color_white(), 0);
          if (s_ring) {
-             lv_obj_set_style_arc_color(s_ring, lv_color_hex(accent), LV_PART_INDICATOR);
+-            lv_obj_set_style_arc_color(s_ring, lv_color_hex(accent), LV_PART_INDICATOR);
++            /* White: faint while listening and replying, solid while Muse works on it. */
++            lv_obj_set_style_arc_color(s_ring, lv_color_white(), LV_PART_INDICATOR);
++            lv_obj_set_style_arc_opa(s_ring, mode == MUSE_MODE_THINKING ? LV_OPA_COVER : LV_OPA_40,
++                                     LV_PART_INDICATOR);
          } else {
-@@ -1540,7 +1719,8 @@ static void update_status(muse_mode_t mode, float now)
+             lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
+         }
+@@ -1470,7 +1745,7 @@ static void update_status(muse_mode_t mode, float now)
+     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
+         ring = (int)(muse_state_progress() * RING_RANGE);
+     } else if (mode == MUSE_MODE_THINKING) {
+-        ring = RING_RANGE / 6;
++        ring = muse_board->listen_dots ? RING_RANGE : RING_RANGE / 6;   /* a solid ring, or a spinner */
+     }
+     if (s_ring && mode == MUSE_MODE_THINKING) {
+         /* Move the indicator rather than rotate the arc: a rotation redraws
+@@ -1498,7 +1773,7 @@ static void update_status(muse_mode_t mode, float now)
+     }
+ 
+     /* The mic's meter; a reply's page has the room while answering. */
+-    bool meter = mode == MUSE_MODE_LISTENING;
++    bool meter = mode == MUSE_MODE_LISTENING && !muse_board->listen_dots;
+     set_meter_visible(meter);
+     if (meter && !s_small) {
+         int lit = (int)lroundf(s_level * METER_SEGS);
+@@ -1540,12 +1815,30 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif
 -        lv_label_set_text(lbl, caption);
+-        lv_obj_set_flag(lbl, LV_OBJ_FLAG_HIDDEN, !caption[0]);
 +        static char shown_caption[640];
 +        lv_label_set_text(lbl, sentence_case(caption, shown_caption, sizeof(shown_caption)));
-         lv_obj_set_flag(lbl, LV_OBJ_FLAG_HIDDEN, !caption[0]);
++        bool marked = s_marks && caption[0] && caption[0] < ' ' && !caption[1];   /* drawn below */
++        lv_obj_set_flag(lbl, LV_OBJ_FLAG_HIDDEN, !caption[0] || marked);
          if (s_reply_lbl) {
              lv_obj_add_flag(answer >= 0 ? s_caption_lbl : s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
+         }
+     }
++    if (s_marks) {
++        int mark = caption[0] && !caption[1] ? (!strcmp(caption, MUSE_CAPTION_DOTS) ? 1
++                                                : !strcmp(caption, MUSE_CAPTION_SENT) ? 2 : 0) : 0;
++        if (mark != s_mark) {
++            lv_obj_set_flag(s_marks, LV_OBJ_FLAG_HIDDEN, !mark);
++            lv_obj_set_flag(s_mark_tick, LV_OBJ_FLAG_HIDDEN, mark != 2);
++            s_mark = mark;
++        }
++        /* One dot, two, three, 0.4 s each. */
++        int lit = mark == 1 ? 1 + (int)(now * 2.5f) % 3 : 0;
++        for (int i = 0; i < 3; i++) {
++            if ((i >= lit) != lv_obj_has_flag(s_mark_dots[i], LV_OBJ_FLAG_HIDDEN)) {
++                lv_obj_set_flag(s_mark_dots[i], LV_OBJ_FLAG_HIDDEN, i >= lit);
++            }
++        }
++    }
+     update_power(now);
+ }
+ 
+diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
+index 38c7c9d..8767c26 100644
+--- a/esp32/components/muse/muse_voice.c
++++ b/esp32/components/muse/muse_voice.c
+@@ -238,6 +238,12 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+     feed_live();
+ }
+ 
++/* A status line, or on boards that draw marks for these (listen_dots), the mark. */
++static void status(const char *words, const char *mark)
++{
++    muse_state_set_caption("%s", muse_board->listen_dots ? mark : words);
++}
++
+ /*
+  * Records speech until release or MAX_SECS, starting with the pre-roll; *held
+  * gets the part after the press. It streams to Hatch as it goes if it can.
+@@ -255,7 +261,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+     if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
+         go_live();
+     }
+-    muse_state_set_caption(s_live ? "LISTENING..." : "RECORDING...");
++    status(s_live ? "LISTENING..." : "RECORDING...", MUSE_CAPTION_DOTS);
+     bool heard = false, ok = true;
+     bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
+     char text[96];
+@@ -289,7 +295,9 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+         while (s_live && (ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
+             if (ev == MUSE_HATCH_EV_HEARD && text[0]) {
+                 heard = true;
+-                muse_state_set_caption("%s", text);
++                if (!muse_board->listen_dots) {   /* there, the dots stay while it listens */
++                    muse_state_set_caption("%s", text);
++                }
+             } else if (ev == MUSE_HATCH_EV_ERROR) {
+                 ESP_LOGW(TAG, "muse: %s", text);
+                 muse_hatch_turn_cancel();
+@@ -309,7 +317,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+             go_live();
+         }
+         muse_state_set_progress((float)n / MAX_FRAMES);
+-        if (!heard && ok && tick) {
++        if (!heard && ok && tick && !muse_board->listen_dots) {
+             muse_state_set_caption("%s %.1fs", s_live ? "LISTENING" : "RECORDING", (double)n / MUSE_AUDIO_RATE);
+         }
+         /*
+@@ -347,7 +355,7 @@ static void go_idle(const char *caption);
+ static bool hatch_reply(bool *delivered)
+ {
+     muse_state_set_mode(MUSE_MODE_THINKING);
+-    muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
++    status("SENDING VOICE NOTE", MUSE_CAPTION_DOTS);   /* until there's a transcript or reply */
+     static int16_t buf[MUSE_AUDIO_CHUNK];
+     static const int16_t silence[MUSE_AUDIO_CHUNK];
+     char text[96];
+@@ -361,14 +369,14 @@ static bool hatch_reply(bool *delivered)
+         while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
+             switch (ev) {
+             case MUSE_HATCH_EV_HEARD:
+-                if (!speaking && !replied) {
++                if (!speaking && !replied && !muse_board->listen_dots) {
+                     muse_state_set_caption("\"%s\"", text);
+                 }
+                 break;
+             case MUSE_HATCH_EV_SENT:
+                 *delivered = true;
+                 if (!speaking && !replied) {
+-                    muse_state_set_caption("NOTE SENT - WAITING FOR MUSE");
++                    status("NOTE SENT - WAITING FOR MUSE", MUSE_CAPTION_SENT);
+                 }
+                 break;
+             case MUSE_HATCH_EV_REPLY:
+@@ -639,7 +647,7 @@ static bool send_held(bool quiet)
+              h->tries + 1);
+     if (!quiet) {
+         muse_state_set_mode(MUSE_MODE_THINKING);
+-        muse_state_set_caption("SENDING SAVED NOTE");
++        status("SENDING SAVED NOTE", MUSE_CAPTION_DOTS);
+     }
+     muse_hatch_turn_begin();
+     size_t sent = 0;
+@@ -665,7 +673,7 @@ static bool send_held(bool quiet)
+         s_next_send_us = 0;   /* the next one right away */
+         s_send_backoff_us = RETRY_MIN_US;
+         if (quiet) {
+-            muse_state_set_caption("SAVED NOTE SENT");
++            status("SAVED NOTE SENT", MUSE_CAPTION_SENT);
+         }
+         return interrupted;
+     } else if (++h->tries >= HELD_TRIES) {
+@@ -728,7 +736,7 @@ static bool finish_note(void)
+         if (s_live && !fed) {
+             /* Hatch is behind (still connecting, say): the rest from the kept note. */
+             muse_state_set_mode(MUSE_MODE_THINKING);
+-            muse_state_set_caption("SENDING VOICE NOTE");
++            status("SENDING VOICE NOTE", MUSE_CAPTION_DOTS);
+             fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
+             if (!fed) {
+                 muse_hatch_turn_cancel();
 diff --git a/esp32/devices/sdkconfig.muse-m5stack-stopwatch b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
 index 3aef13f..58f411d 100644
 --- a/esp32/devices/sdkconfig.muse-m5stack-stopwatch
@@ -3584,6 +3915,79 @@ index 3aef13f..58f411d 100644
 +
 +# The avatar clips live in their own partition (partitions_stopwatch.csv: partitions_muse.csv + "anims").
 +CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_stopwatch.csv"
+diff --git a/esp32/main/app.c b/esp32/main/app.c
+index b7f076d..1ea183c 100644
+--- a/esp32/main/app.c
++++ b/esp32/main/app.c
+@@ -140,8 +140,21 @@ static int64_t s_last_vm_auth_refresh_attempt_us = 0;
+ // first one falls due once uptime alone exceeds the interval.
+ static int64_t s_last_periodic_token_refresh_us = 0;
+ // The SDK token reaches Muse only in refresh bodies until apps forward it at
+-// mint, so each boot of a token-bearing build attempts one refresh to report it.
++// mint, so a token-bearing build refreshes once to report it. Once that refresh
++// is stored, NVS remembers the token it carried ("sdk_tok_rptd"), so later boots
++// skip it. Every refresh rotates the refresh token, and a reset between the
++// server rotating it and NVS saving the new one unpairs the device; doing that
++// on every boot made any reset a few seconds into a boot (a flash, a monitor
++// opening the port, a crash) cost the pairing.
+ static bool s_sdk_token_report_attempted = false;
++
++static bool sdk_token_report_due_unlocked(void) {
++    const char *sdk = identity_sdk_token();
++    if (!sdk || s_sdk_token_report_attempted) return false;
++    char reported[96] = {0};
++    return !config_get_str("sdk_tok_rptd", reported, sizeof(reported))
++           || strcmp(reported, sdk) != 0;
++}
+ static int64_t s_vm_auth_refresh_interval_us = VM_AUTH_REFRESH_RETRY_INTERVAL_US;
+ static uint8_t s_vm_auth_refusals = 0;
+ static bool s_vm_auth_refresh_pending = false;
+@@ -899,7 +912,7 @@ static bool ensure_access_token_ready_with_gate_held(
+                    >= TOKEN_PERIODIC_REFRESH_INTERVAL_US;
+ #endif
+ 
+-    bool sdk_token_report_due = identity_sdk_token() && !s_sdk_token_report_attempted;
++    bool sdk_token_report_due = sdk_token_report_due_unlocked();
+ 
+     if (!access_token_rejected && !periodic_due && !sdk_token_report_due) {
+         // Nothing has complained about this token, so keep using it.
+@@ -935,7 +948,15 @@ static bool ensure_access_token_ready_with_gate_held(
+     if (rc == 0) {
+         ok = store_token_pair_unlocked(tokens.access_token, tokens.refresh_token);
+         vm_device_tokens_free(&tokens);
+-        ESP_LOGI(TAG, "device token refresh stored (method=%d)", (int)method);
++        if (ok) {
++            ESP_LOGI(TAG, "device token refresh stored (method=%d)", (int)method);
++            if (identity_sdk_token()) config_set_str("sdk_tok_rptd", identity_sdk_token());
++        } else {
++            // The server has already retired the old pair, so this device is
++            // unpaired from here on; say so rather than logging success.
++            ESP_LOGE(TAG, "device token refresh (method=%d): storing the new pair failed",
++                     (int)method);
++        }
+         goto done;
+     }
+     vm_device_tokens_free(&tokens);
+diff --git a/esp32/main/config_store.c b/esp32/main/config_store.c
+index 712b6b3..a255d49 100644
+--- a/esp32/main/config_store.c
++++ b/esp32/main/config_store.c
+@@ -161,6 +161,7 @@ bool config_clear_pairing(void) {
+         "auth_token",
+         "vm_url",
+         "username",
++        "sdk_tok_rptd",
+     };
+     return clear_and_verify(keys, sizeof(keys) / sizeof(keys[0]));
+ }
+@@ -181,6 +182,7 @@ bool config_clear_setup(void) {
+         "wifi_others",
+         "wifi_hidden",
+         "setup_complete",
++        "sdk_tok_rptd",
+     };
+     return clear_and_verify(keys, sizeof(keys) / sizeof(keys[0]));
+ }
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
 index 29d4d8b..87a70d3 100644
 --- a/esp32/main/muse_glue.c
@@ -3621,9 +4025,51 @@ index 29d4d8b..87a70d3 100644
      muse_ble_set_name(identity_ble_name());
      ble_companion_t companion = {
          .svcs = muse_ble_services(),
+diff --git a/esp32/main/vm_api.c b/esp32/main/vm_api.c
+index e83b6e1..37a5092 100644
+--- a/esp32/main/vm_api.c
++++ b/esp32/main/vm_api.c
+@@ -424,11 +424,24 @@ static int do_refresh(const char *auth_header, const char *device_id,
+     make_api_url(url, sizeof(url), REFRESH_TOKEN_PATH);
+     if (s_sdk_token[0]) ESP_LOGI(TAG, "refresh carries SDK token %.12s", s_sdk_token);
+ 
++    // One attempt, no retries. The server rotates the refresh token when it
++    // accepts it, so if the reply is lost (a timeout, a dropped TLS session) a
++    // retry presents the token it just retired, gets 401, and the caller would
++    // unpair a device whose new pair is sitting on the server. A failed attempt
++    // returns VM_API_ERR_FAILED and the caller keeps the stored pair.
+     resp_buf_t resp = {0};
+-    int rc = http_json_with_retries(url, HTTP_METHOD_POST, auth_header, body,
+-                                    &resp, status_out);
++    int status = 0;
++    int rc = http_json(url, HTTP_METHOD_POST, auth_header, body, &resp, &status);
++    if (status_out) *status_out = status;
+     cJSON_free(body);
+-    if (rc != 0) return rc;
++    if (rc != 0) {
++        free(resp.buf);
++        if (rc != VM_API_ERR_AUTH) {
++            ESP_LOGW(TAG, "device token refresh failed (status=%d); not retrying", status);
++        }
++        return rc == VM_API_ERR_AUTH ? VM_API_ERR_AUTH : VM_API_ERR_FAILED;
++    }
++    ESP_LOGI(TAG, "HTTP %d, %d bytes", status, (int)resp.len);
+     return parse_token_pair(&resp, out);
+ }
+ 
+@@ -472,7 +485,8 @@ int vm_api_refresh_device_token(const char *access_token,
+         return rc;
+     }
+ 
+-    ESP_LOGI(TAG, "access token rejected, trying refresh token");
++    if (have_access) ESP_LOGI(TAG, "access token rejected, trying refresh token");
++    else ESP_LOGI(TAG, "refreshing with the refresh token");
+     if (make_refresh_bearer(refresh_token, auth_header, sizeof(auth_header)) != 0) {
+         return VM_API_ERR_FAILED;
+     }
 diff --git a/esp32/partitions_stopwatch.csv b/esp32/partitions_stopwatch.csv
 new file mode 100644
-index 0000000..9c5391a
+index 0000000..a31cd56
 --- /dev/null
 +++ b/esp32/partitions_stopwatch.csv
 @@ -0,0 +1,30 @@
@@ -3655,8 +4101,8 @@ index 0000000..9c5391a
 +prod_data, data, 0x40,    0x820000, 0x1000,
 +prod_bak,  data, 0x41,    0x821000, 0x1000,
 +# The StopWatch's avatar clips (avatar/character in the stopwatch-muse-gadget repo),
-+# in the 16 MB flash's otherwise unused upper half.
-+anims,     data, 0x99,    0x830000, 0x700000,
++# in the 16 MB flash's otherwise unused upper half, to its end.
++anims,     data, 0x99,    0x830000, 0x7D0000,
 diff --git a/esp32/tests/test_muse_voice_note.py b/esp32/tests/test_muse_voice_note.py
 index 8403bec..5d19425 100644
 --- a/esp32/tests/test_muse_voice_note.py

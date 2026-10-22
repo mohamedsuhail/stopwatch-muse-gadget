@@ -31,6 +31,19 @@ Done:
 - [x] Custom avatar: the toy astronaut, now at 384 px (6×).
 - [x] Screen: Montserrat text on dark bands, bold sentence-case state word, Wi-Fi inside the battery
       ring at 3 o'clock, rim icons and top status line hidden, MOBOT painter's-tape label.
+- [x] Smooth, sharper clips (Oct 22): 256 px at 24 fps, decoded with `esp_new_jpeg` in a background
+      task (about 22 ms a frame, its memory in PSRAM), redrawn only where they change, scaled 3:2
+      without multiplies. Measured on the watch: ticks 42 ms apart (43 ms at most), scaling 10 ms.
+- [x] Listening and sending show three round dots that build up, and a sent note a tick, in place of
+      "Listening 2.3s" and "Note sent - waiting for Muse". The ring is white. Pairing shows an arrow
+      at the blue button with "Press to pair".
+- [x] **Pairing lost after flashes** (5 times on Oct 22). Every boot refreshed the token to report
+      the SDK token, each refresh rotates the refresh token, and a reset (a flash, a serial monitor
+      opening the port) between the server rotating it and NVS saving the new one left a stale token,
+      so the next boot got HTTP 401 and unpaired. Fixed in the patch: the report happens once and is
+      remembered in NVS (`sdk_tok_rptd`), the refresh isn't retried with a token the server may
+      already have retired, and a failed store is logged as an error. Three flashes since kept the
+      pairing. To read the log without resetting the watch, open the port with DTR and RTS low.
 - [x] Avatar as video clips (Oct 22): one clip per state, packed into a new `anims` flash
       partition and played by `avatar/character/muse_pixel.c`. The screen went black and white, and
       the state word is hidden since the clips show the state. Builds; **still to check

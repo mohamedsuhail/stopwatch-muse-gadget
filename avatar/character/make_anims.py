@@ -6,7 +6,7 @@
 CLIPS_DIR (default avatar/character/clips) holds wake, idle, listening,
 thinking, speaking, happy, error and goodbye .mp4 (16:9, character centred on
 black). Each is cropped to its centre square, scaled to SIZE px at FPS, its
-near-black background made true black, and the loop states trimmed to their
+near-black background made true black, sharpened a little, and the loop states trimmed to their
 best-matching start and end frames. OUT (default avatar/character/anims.pack)
 is what scripts/flash.sh writes to the "anims" partition. Needs ffmpeg and
 Pillow.
@@ -19,14 +19,15 @@ anims.pack, little-endian:
     the frames: baseline JPEG
 """
 import io, os, struct, subprocess, sys, tempfile
-from PIL import Image, ImageChops, ImageStat
+from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIPS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "clips")
 OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "anims.pack")
 STATES = ["wake", "idle", "listening", "thinking", "speaking", "happy", "error", "goodbye"]
 ONCE = {"wake", "goodbye"}
-SIZE, FPS, QUALITY = 192, 12, 85
+SIZE, FPS, QUALITY = 256, 24, 85   # 1.5x to the watch's 384 px; 7.6 MB, just inside the partition
+SHARPEN = ImageFilter.UnsharpMask(radius=1.0, percent=80, threshold=2)   # offsets the watch's blow-up
 
 def frames(name):
     with tempfile.TemporaryDirectory() as tmp:
@@ -37,7 +38,7 @@ def frames(name):
         for f in sorted(os.listdir(tmp)):
             im = Image.open(os.path.join(tmp, f)).convert("RGB")
             mask = im.convert("L").point(lambda v: 255 if v > 22 else 0)   # noise -> true black
-            clean = Image.new("RGB", im.size); clean.paste(im, (0, 0), mask)
+            clean = Image.new("RGB", im.size); clean.paste(im.filter(SHARPEN), (0, 0), mask)
             out.append(clean)
         return out
 

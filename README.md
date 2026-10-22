@@ -85,10 +85,13 @@ commands that discard them.
 **On the first flash, the script backs up the 16 MB factory firmware** to
 `backups/stopwatch-factory-<date>.bin` (`esptool --chip esp32s3 -p PORT read-flash 0 0x1000000 ...`)
 and writes a `.sha256` checksum next to it before flashing. Later runs detect the existing backup and
-skip straight to flashing, so you keep one golden copy of the factory image. Then it flashes with
-`tools/muse/board.sh flash stopwatch [PORT]`, and writes the avatar clips
-(`avatar/character/anims.pack`, about 2.4 MB) to the `anims` partition at `0x830000`. It skips the
-clips when the chip already has them (`esptool verify-flash`).
+skip straight to flashing, so you keep one golden copy of the factory image. Then it writes the
+avatar clips (`avatar/character/anims.pack`, about 7.6 MB) to the `anims` partition at `0x830000`,
+skipping them when the chip already has them (`esptool verify-flash`), and flashes the firmware with
+`tools/muse/board.sh flash stopwatch [PORT]`. The clips go first and leave the chip in its bootloader,
+so the firmware flash resets it only once. A second reset a moment into booting can cut off the
+watch's login refresh after Muse's server has issued a new token but before the watch has saved it,
+and the next boot then unpairs it.
 
 The `.sha256` file only proves the file hasn't changed since it was written. To prove the backup
 matches the chip, compare it against the device before the first flash:
@@ -247,14 +250,25 @@ state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind 
   and goodbye `.mp4`s (16:9, the character centred on black). Wake and goodbye play once and hold
   their last frame. The others loop.
 - **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow) crops each clip to
-  its centre square at 192 px and 12 fps, makes the near-black background true black, and trims
-  each loop to its best-matching start and end frames. It writes `avatar/character/anims.pack`
-  (baseline JPEGs plus an index; the format is in the script's docstring).
+  its centre square at 256 px and 24 fps, makes the near-black background true black, sharpens it a
+  little, and trims each loop to its best-matching start and end frames. It writes
+  `avatar/character/anims.pack` (baseline JPEGs at quality 85 plus an index, 7.64 MB; the format is
+  in the script's docstring). `avatar/quality-options.png` compares the sizes and qualities tried.
 - **On the watch:** the pack lives in its own `anims` flash partition
-  (`esp32/partitions_stopwatch.csv`: the SDK's table plus `anims` at `0x830000`, 7 MB, in the 16 MB
-  flash's otherwise unused upper half). The player maps it, decodes a frame with the ROM's JPEG
-  decoder when the frame changes, and scales it to the canvas with bilinear filtering. Without the
-  partition, or before `flash.sh` has written it, the avatar stays black and the log says why.
+  (`esp32/partitions_stopwatch.csv`: the SDK's table plus `anims` from `0x830000` to the end of the
+  16 MB flash, 7.8 MB). Without the partition, or before `flash.sh` has written it, the avatar stays
+  black and the log says why.
+- **Playback:** the UI ticks every 42 ms (`.frame_ms = 42`, 24 Hz), one tick per frame. A
+  background task decodes the next frame with Espressif's SIMD JPEG decoder (`esp_new_jpeg`, about
+  22 ms a frame) into a second buffer, so the tick only swaps buffers. The decoder's stack and its
+  tables are in PSRAM (the clip player supplies `esp_new_jpeg`'s allocators, preferring PSRAM),
+  so it takes no internal RAM, which Wi-Fi, TLS and BLE run short of. The decoder also finds the
+  box of pixels that changed, and only that box is redrawn (`muse_pixel_dirty()`, a hook the patch
+  adds to `muse_pixel.h`; other avatars keep the UI's own per-cell check). The 256 px frame is
+  scaled 3:2 to the 384 px canvas by repeating and averaging pixels (each pair a, b becomes
+  a, (a+b)/2, b), which needs no multiplies.
+- **Timing:** the log reports decode and tick times once after boot (`muse_anim: ... frames decode
+  in ...` and `... ticks at ... ms apart`).
 - **Preview:** `avatar/character/preview.gif` shows every clip.
 
 **The pixel astronaut.** `avatar/muse_pixel.c` draws the same character as 64 px pixel art (white
@@ -307,11 +321,26 @@ Nothing leaves the watch until you hold the blue button.
 **Battery and Wi-Fi ring.** A ring at 3 o'clock with the Wi-Fi symbol inside.
 
 - **Charge:** the ring's fill on a dark grey track. White above 30%, yellow from 15 to 30%, red
-  below 15%, green while charging.
+  below 15%, green while charging. Full on USB is white (the charger keeps topping up at 100%).
 - **Wi-Fi symbol:** steady when connected, blinking while joining.
 - **Updates:** once a second. The ring is hidden when the watch can't read the battery.
 - **Code:** the board places it (`.battery_ring = { LV_ALIGN_CENTER, 180, 0 }`). Setting it also
   hides the SDK's top status line (Wi-Fi, Bluetooth and battery text).
+
+**Dots and ticks instead of status lines.** With `.listen_dots = true`, the voice task's status
+lines become marks in the caption's place (`MUSE_CAPTION_DOTS` and `MUSE_CAPTION_SENT` in
+`muse_state.h`, drawn in `muse_ui.c`). They are drawn as shapes, not set in a font:
+
+- **Listening and sending:** three round white dots that build up, one, two, three, 0.4 s each. The
+  level meter and the live transcript are hidden.
+- **Note sent to Muse:** a white tick.
+- **Muse's reply, errors and short messages** ("Speaker on") stay as words.
+
+The level meter, shown on boards without `.listen_dots`, is 14 round dots in the state's colour.
+
+**Pairing prompt.** With `.pair_arrow = true`, when the Muse app asks for the talk button, a white
+arrow points at the blue button from just inside the rim, with "Press to pair" under it
+(`avatar/pair-arrow-mockup.png`). The six-digit passkey still shows on its card.
 
 **Hidden rim icons.** `.hide_rim_hints = true` hides the mic, speaker and power icons beside the
 buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
@@ -329,9 +358,10 @@ buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
 - **Scrim:** a soft dark band (black, 70% opaque, rounded) sits behind the state word, captions
   and replies, so white text reads clearly over the white helmet.
 - **Colours:** black and white. Captions, page dots and the settings pages' switches, sliders and
-  buttons are white or grey rather than violet. The ring and level bars take each state's colour
-  from the astronaut's suit (`ACCENT` in `avatar/character/muse_pixel.c`), on dark grey tracks:
-  Ready white, Listening cyan, Thinking yellow, Speaking orange, Error red, Waking and Off grey.
+  buttons are white or grey rather than violet. The edge ring is white on a dark grey track: faint
+  while listening and replying, solid while Muse works on a reply (a full circle rather than a
+  spinner, with `.listen_dots`). The level meter, where shown, takes each state's colour from the
+  astronaut's suit (`ACCENT` in `avatar/character/muse_pixel.c`).
 
 **Tape label.** `.tape_label = true` draws "MOBOT" on worn white painter's tape across the
 top-left: grime, smudges, rubbed marker, and "A7·22·10·K" (22 Oct) in blue ballpoint. It's one
@@ -379,6 +409,8 @@ stopwatch-muse-gadget/
 │   ├── tape.png          # ...and a preview of it
 │   ├── status-mockup.png # the battery ring's states, mocked up
 │   ├── position-options.png # the character 0–60 px lower under the tape
+│   ├── quality-options.png  # clip sizes and JPEG qualities compared
+│   ├── pair-arrow-mockup.png # the pairing prompt's arrow at the blue button
 │   └── *-options.png, *-sample.png  # mockups from choosing fonts and the tape
 ├── docs/
 │   ├── plan.md           # project plan and status
