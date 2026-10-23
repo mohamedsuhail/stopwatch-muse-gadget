@@ -6,7 +6,7 @@ import { Audio } from './audio.js';
 import { MuseMock, DEFAULT_NOTES } from './muse-mock.js';
 import { MuseSerial } from './muse-serial.js';
 import { MuseMac } from './muse-mac.js';
-import { DEFAULT_STYLE, Orchestrator } from './orchestrator.js';
+import { DEFAULT_PERSONA, DEFAULT_STYLE, OLD_STYLES, Orchestrator } from './orchestrator.js';
 import { XaiRealtime } from './xai-realtime.js';
 
 const $ = (id) => document.getElementById(id);
@@ -16,10 +16,13 @@ const KEY = 'mobot-live-voice';
 
 const DEFAULTS = {
     museKind: 'mock', mirror: true, wait: 'block', speak: 'verbatim', routing: 'personal', button: 'conversation',
-    voice: 'iris', handsFree: false, style: DEFAULT_STYLE, notes: DEFAULT_NOTES,
+    voice: 'iris', handsFree: false, style: DEFAULT_STYLE, notes: DEFAULT_NOTES, persona: DEFAULT_PERSONA,
 };
 let settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) || '{}') };
-const SESSION_KEYS = ['wait', 'speak', 'routing', 'voice', 'handsFree'];
+if (OLD_STYLES.includes(settings.style)) {
+    settings.style = DEFAULT_STYLE;   /* an earlier default, saved before it changed */
+}
+const SESSION_KEYS = ['wait', 'speak', 'routing', 'voice', 'handsFree', 'persona'];
 
 function showSettings() {
     for (const name of ['museKind', 'button', 'wait', 'speak', 'routing']) {
@@ -30,6 +33,7 @@ function showSettings() {
     $('mirror').checked = settings.mirror;
     $('handsFree').checked = settings.handsFree;
     $('style').value = settings.style;
+    $('persona').value = settings.persona;
     $('notes').value = settings.notes;
     if (![...$('voice').options].some((o) => o.value === settings.voice)) {
         $('voice').add(new Option(settings.voice, settings.voice));
@@ -525,6 +529,7 @@ $('mirror').onchange = (e) => setSetting('mirror', e.target.checked);
 $('handsFree').onchange = (e) => setSetting('handsFree', e.target.checked);
 $('voice').onchange = (e) => setSetting('voice', e.target.value);
 $('style').onchange = (e) => setSetting('style', e.target.value);
+$('persona').onchange = (e) => setSetting('persona', e.target.value);
 $('notes').onchange = (e) => setSetting('notes', e.target.value);
 $('reset').onclick = () => {
     settings = { ...DEFAULTS };

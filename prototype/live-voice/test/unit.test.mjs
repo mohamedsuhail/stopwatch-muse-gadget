@@ -9,7 +9,7 @@ import { test } from 'node:test';
 
 import { MuseMock } from '../muse-mock.js';
 import { MuseSerial, splitMessage } from '../muse-serial.js';
-import { Orchestrator, instructions } from '../orchestrator.js';
+import { Orchestrator, instructions, tools } from '../orchestrator.js';
 import { speakable } from '../speakable.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -371,4 +371,15 @@ test('push-to-talk is unchanged when no conversation is on', () => {
     talk(rt, orch);
     assert.ok(rt.types().includes('input_audio_buffer.commit'));
     assert.equal(orch.conversing, false);
+});
+
+test('the voice is the user\'s persona, and never brings up the device', () => {
+    const own = instructions({ routing: 'personal', wait: 'block', speak: 'verbatim', persona: 'You are Juno. Dry humour.' });
+    assert.ok(own.startsWith('You are Juno. Dry humour.'), 'the persona comes first');
+    const dflt = instructions({ routing: 'personal', wait: 'block', speak: 'verbatim' });
+    assert.match(dflt, /not a chatbot/);
+    for (const text of [own, dflt, JSON.stringify(tools())]) {
+        assert.doesNotMatch(text, /stopwatch|m5stack|astronaut/i);
+        assert.doesNotMatch(text.replace(/Never bring up[^.]*\./, ''), /\bwatch\b/i, 'only the rule itself names a watch');
+    }
 });

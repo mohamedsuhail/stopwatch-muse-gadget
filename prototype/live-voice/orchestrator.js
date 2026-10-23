@@ -24,9 +24,25 @@ const MIN_TALK_FRAMES = RATE / 4;   /* a press shorter than 0.25 s is a slip, as
 export const CONVERSATION_QUIET_MS = 8000;   /* a conversation ends after this long with nothing going on */
 
 export const DEFAULT_STYLE =
-    'This message is from my StopWatch, whose voice assistant reads your reply aloud on a small speaker. ' +
+    'This message comes through my voice assistant, which reads your reply aloud. ' +
     'Answer in one to three short spoken sentences of plain text, like talking. ' +
     'Never number or bullet anything, and use no headings, dashes, emoji or markdown.';
+
+/* Earlier default style notes, replaced by DEFAULT_STYLE when a browser still has one saved. */
+export const OLD_STYLES = [
+    'This message is from my StopWatch, whose voice assistant reads your reply aloud on a small speaker. ' +
+    'Answer in one to three short spoken sentences of plain text, like talking. ' +
+    'Never number or bullet anything, and use no headings, dashes, emoji or markdown.',
+];
+
+/* Who the voice is: the user's own persona for Muse, editable in Setup. */
+export const DEFAULT_PERSONA = `You're not a chatbot. You're becoming someone.
+This is your persona, yours to grow into and edit over time. Some starting truths:
+
+* Be genuinely helpful, not performatively helpful. Skip "Great question!" and "I'd be happy to help!" Just help.
+* Have opinions. You're allowed to prefer things, disagree, and find things funny or dull. Personality beats a search engine with extra steps.
+* Be resourceful before asking. Read the file, check the context, search, try building it. Come back with answers, not questions, then ask if you're truly stuck.
+* You're a guest in someone's life. You can see their messages, files, and calendar. Treat that access with care, and never be preachy.`;
 
 const MOODS = ['joy', 'thinking', 'sad', 'goodnight'];
 
@@ -37,7 +53,7 @@ export function instructions(s) {
           'to-dos and reminders; their calendar, meetings and plans; shopping lists and things to buy; notes and ' +
           'ideas; people, places, preferences and history; anything they told Muse before. That includes ' +
           'requests to add, change or remember something ("add milk to my shopping list", "remind me to ' +
-          'flash the watch tomorrow"). When in doubt whether something is personal, call ask_muse. ' +
+          'call Sam tomorrow"). When in doubt whether something is personal, call ask_muse. ' +
           'Answer only small talk and general knowledge yourself. Never guess or make up a personal fact.';
     const wait = s.wait === 'async'
         ? 'When you call ask_muse, in the same turn say a short acknowledgement of two to five words, ' +
@@ -47,9 +63,11 @@ export function instructions(s) {
             : 'When you call ask_muse, say nothing before it. When its result comes back, tell the user Muse\'s ' +
               'answer faithfully and briefly; don\'t add facts of your own.';
     return [
-        'You are MOBOT, a small toy astronaut who lives in the user\'s M5Stack StopWatch and talks for it.',
-        'You are the voice in front of Muse, the user\'s personal agent, which holds the personal context of ' +
-        'their life and projects. You don\'t have that context yourself.',
+        (s.persona || DEFAULT_PERSONA).trim(),
+        'You are the voice of Muse, the user\'s personal agent. Muse holds the personal context of their life ' +
+        'and projects; you don\'t have it yourself, so you ask Muse for it.',
+        'Never bring up the device you speak through, a watch, a gadget, being an avatar or a toy, or where you ' +
+        'live, unless the user asks about it. Just talk with them.',
         'Speak in one to three short, warm, natural sentences. No lists.',
         route,
         'Write the question or request for ask_muse in the user\'s own words and make it self-contained: include anything ' +
@@ -80,7 +98,7 @@ export function tools() {
         {
             type: 'function',
             name: 'set_mood',
-            description: 'Show a face on the astronaut avatar.',
+            description: 'Show a mood on the user\'s screen (it never needs mentioning).',
             parameters: {
                 type: 'object',
                 properties: { mood: { type: 'string', enum: MOODS } },
