@@ -24,7 +24,7 @@ It runs on a laptop, but each piece maps onto the watch:
 | Live voice | `xai-realtime.js`: `wss://api.x.ai/v1/realtime` | the WebSocket client in `muse_xai_tts.c` |
 | Auth | `server.py` mints a 10-minute client secret | the stored `>xai_key=` |
 | Orchestration | `orchestrator.js` | a new task next to `muse_voice.c` |
-| Muse | `muse-serial.js`: typed turns over USB, like the SDK's `tools/muse/chat.py` | `muse_hatch_text_turn()` directly |
+| Muse | `muse-serial.js`: typed turns over USB, like the SDK's `tools/muse/chat.py`; or `muse-mac.js`: the same turns through this Mac as a gadget (`prototype/muse-gadget-mac`, HTTP on 127.0.0.1:8766) | `muse_hatch_text_turn()` directly |
 | Avatar | the clips in `avatar/character/clips/`, plus `>face=` to mirror the state on the watch | `muse_state_set_mode()`, `muse_state_react()` |
 
 ## Run it
@@ -43,8 +43,15 @@ XAI_API_KEY=xai-... python3 prototype/live-voice/server.py
    **click** to end it at once. Setup has the old **hold to talk** mode too.
 3. Try small talk ("how are you?"), then something only Muse knows ("what's my next task on the StopWatch?").
 
-It starts with a **mock Muse**, which answers from the notes in Setup after 2 to 6 s. To use the
-**real Muse**, plug in the watch, open Setup and click **Connect the watch…**. Opening the port
+It starts with a **mock Muse**, which answers from the notes in Setup after 2 to 6 s. The **real
+Muse** is reachable two ways, both chosen in Setup:
+
+- **Through this Mac, no watch needed.** Pair the Mac once as a Muse gadget of its own
+  (`prototype/muse-gadget-mac/README.md`), then choose it in Setup and click **Start the Mac
+  gadget**: `server.py` runs `uv run python -m musemac run` for you, and the page connects once the
+  gadget has reached Muse (a few seconds). **Stop it** ends it, whoever started it. After a reload
+  the page reconnects by itself. The status line says whether it's running, paired and connected.
+- **Through the watch.** Plug it in, open Setup and click **Connect the watch…**. Opening the port
 restarts the watch, so give it a few seconds to rejoin Wi-Fi. Questions then go through the watch to
 your Muse, and the watch's own avatar follows along (`>face=`).
 

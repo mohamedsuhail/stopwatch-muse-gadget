@@ -19,6 +19,7 @@ body { margin: 0; }
 main { display: grid; grid-template-columns: 420px 1fr; min-height: 100vh; }
 button { font: inherit; color: inherit; background: #24242b; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
 button:disabled { opacity: .45; cursor: default; }
+.gadget { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 8px 22px; }
 button.primary { background: var(--blue); border-color: var(--blue); }
 code, kbd { font: 12px ui-monospace, Menlo, monospace; background: #24242b; padding: 1px 4px; border-radius: 4px; }
 

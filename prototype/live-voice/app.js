@@ -5,6 +5,7 @@
 import { Audio } from './audio.js';
 import { MuseMock, DEFAULT_NOTES } from './muse-mock.js';
 import { MuseSerial } from './muse-serial.js';
+import { MuseMac } from './muse-mac.js';
 import { DEFAULT_STYLE, Orchestrator } from './orchestrator.js';
 import { XaiRealtime } from './xai-realtime.js';
 
@@ -45,6 +46,9 @@ function setSetting(name, value) {
     }
     if (name === 'museKind') {
         useMuse();
+        if (value === 'mac' && !macMuse) {
+            connectMac();
+        }
     }
     if (name === 'button') {
         orch.endConversation('click');
@@ -239,17 +243,21 @@ function event(ev, notable) {
 const audio = new Audio();
 const rt = new XaiRealtime();
 const mock = new MuseMock(() => settings.notes);
-/* With the real Muse chosen but no watch, questions fail out loud rather than
+/* With a real Muse chosen but not connected, questions fail out loud rather than
    going to the mock, whose "nothing in your notes" sounds like Muse. */
-const noWatch = {
-    name: 'Muse (watch not connected)',
+const notConnected = (name, why) => ({
+    name,
     async ask() {
-        throw new Error("the watch isn't connected. Open Setup and click Connect the watch");
+        throw new Error(why);
     },
     async face() {},
     async close() {},
-};
+});
+const noWatch = notConnected('Muse (watch not connected)', "the watch isn't connected. Open Setup and click Connect the watch");
+const noMac = notConnected('Muse (this Mac, not connected)',
+    "this Mac isn't connected to Muse. Click Start the Mac gadget in Setup");
 let board = null;
+let macMuse = null;   /* the Mac gadget's bridge, once it answered */
 let muse = mock;
 
 const orch = new Orchestrator({
@@ -277,14 +285,15 @@ const orch = new Orchestrator({
 });
 
 function useMuse() {
-    const want = settings.museKind === 'serial' ? board : mock;
+    const kind = settings.museKind;
+    const want = kind === 'serial' ? board : kind === 'mac' ? macMuse : mock;
     if (!want) {
-        $('musePill').textContent = 'Muse · watch not connected';
+        $('musePill').textContent = kind === 'mac' ? 'Muse · Mac not connected' : 'Muse · watch not connected';
         $('musePill').className = 'pill bad';
-        muse = noWatch;
+        muse = kind === 'mac' ? noMac : noWatch;
     } else {
         muse = want;
-        $('musePill').textContent = muse === mock ? 'Muse · mock' : 'Muse · watch';
+        $('musePill').textContent = muse === mock ? 'Muse · mock' : muse === macMuse ? 'Muse · this Mac' : 'Muse · watch';
         $('musePill').className = muse === mock ? 'pill' : 'pill ok';
     }
     if (orch.muse !== muse) {
@@ -364,6 +373,86 @@ async function connectWatch() {
 
 $('connect').onclick = connect;
 $('serialConnect').onclick = connectWatch;
+
+/* The Mac gadget needs no port picker, so the page connects to it by itself when it's chosen. */
+async function connectMac({ quiet = false } = {}) {
+    try {
+        $('musePill').textContent = 'Muse · connecting to this Mac';
+        macMuse = await MuseMac.connect();
+        if (settings.museKind !== 'mac') {
+            settings.museKind = 'mac';
+            showSettings();
+            setSetting('museKind', 'mac');
+        } else {
+            useMuse();
+        }
+        sys('This Mac is connected: questions for Muse go through it, no watch needed.');
+    } catch (e) {
+        macMuse = null;
+        if (!quiet) {
+            bubble('err', '', 'This Mac: ' + e.message);
+        }
+        useMuse();
+    }
+}
+$('macConnect').onclick = () => connectMac();
+
+/* Starting and stopping the Mac gadget, through server.py (a page can't run programs). */
+function gadgetLine(st) {
+    const dev = st?.bridge?.device;
+    $('macStatus').textContent = !st ? 'Mac gadget: server.py doesn\'t answer'
+        : !st.running ? 'Mac gadget: stopped'
+            : !st.bridge ? 'Mac gadget: starting…'
+                : !dev?.paired ? 'Mac gadget: running, not paired (run `uv run python -m musemac pair`)'
+                    : dev.connected ? `Mac gadget: running, connected to Muse (${dev.node_id})` : 'Mac gadget: running, connecting to Muse…';
+    $('macStart').disabled = !!st?.running;
+    $('macStop').disabled = !st?.running;
+}
+
+async function gadget(action) {
+    const res = await fetch('/api/gadget' + (action ? '/' + action : ''), action ? { method: 'POST' } : {});
+    const st = await res.json();
+    if (!res.ok) throw new Error(st.error || 'HTTP ' + res.status);
+    gadgetLine(st);
+    return st;
+}
+
+async function startGadget() {
+    try {
+        $('macStart').disabled = true;
+        $('macStatus').textContent = 'Mac gadget: starting…';
+        let st = await gadget('start');
+        for (let i = 0; i < 40 && !st.bridge?.device?.connected; i++) {   /* up to 20 s to reach Muse */
+            await new Promise((r) => setTimeout(r, 500));
+            st = await gadget();
+            if (!st.running) break;
+        }
+        if (st.bridge?.device?.connected) {
+            sys('The Mac gadget is running and connected to Muse.');
+            await connectMac();
+        } else {
+            bubble('err', '', 'The Mac gadget didn\'t reach Muse.' + (st.log?.length ? ' Its log: ' + st.log.slice(-4).join(' | ') : ''));
+        }
+    } catch (e) {
+        bubble('err', '', 'Starting the Mac gadget: ' + e.message);
+        gadget().catch(() => gadgetLine(null));
+    }
+}
+
+async function stopGadget() {
+    try {
+        $('macStop').disabled = true;
+        await gadget('stop');
+        macMuse = null;
+        useMuse();
+        sys('The Mac gadget is stopped.');
+    } catch (e) {
+        bubble('err', '', 'Stopping the Mac gadget: ' + e.message);
+    }
+}
+$('macStart').onclick = startGadget;
+$('macStop').onclick = stopGadget;
+gadget().catch(() => gadgetLine(null));
 
 /* The talk button and Space, like the watch's blue button: in "conversation"
  * mode a long press (LONG_PRESS_MS) starts a conversation and a click ends it;
@@ -462,5 +551,8 @@ fetch('/api/voices').then((r) => (r.ok ? r.json() : null)).then((v) => {
 
 showSettings();
 useMuse();
+if (settings.museKind === 'mac') {
+    connectMac({ quiet: true });   /* no picker needed, unlike the watch */
+}
 playClip('idle');
 window.mobot = { orch, settings: () => settings };   /* for poking at it from the console */

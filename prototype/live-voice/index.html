@@ -54,6 +54,13 @@
       <fieldset>
         <legend>Muse</legend>
         <label><input type="radio" name="museKind" value="mock" checked> Mock Muse (the notes below)</label>
+        <label><input type="radio" name="museKind" value="mac"> The real Muse, through this Mac (no watch needed; <code>prototype/muse-gadget-mac</code>)</label>
+        <div class="gadget">
+          <button id="macStart">Start the Mac gadget</button>
+          <button id="macStop">Stop it</button>
+          <button id="macConnect">Connect this Mac</button>
+          <span class="note" id="macStatus">Mac gadget: checking…</span>
+        </div>
         <label><input type="radio" name="museKind" value="serial"> The real Muse, through the watch on USB</label>
         <button id="serialConnect">Connect the watch…</button>
         <label><input type="checkbox" id="mirror"> Mirror the avatar's state on the watch (<code>&gt;face=</code>)</label>
