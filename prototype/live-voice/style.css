@@ -25,11 +25,15 @@ code, kbd { font: 12px ui-monospace, Menlo, monospace; background: #24242b; padd
 /* ---- the watch ---- */
 .device { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 32px 20px; border-right: 1px solid var(--line); }
 .watch { padding: 18px; border-radius: 50%; background: radial-gradient(circle at 30% 25%, #4a4a52, #1d1d22 70%); box-shadow: 0 20px 50px #000a; }
-.screen { position: relative; width: 340px; height: 340px; border-radius: 50%; overflow: hidden; background: #000; }
-.screen video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity .125s linear; }
+/* The watch's 466 px screen at 340 px: --px is one watch pixel. The clips and the tape sit where
+   the firmware puts them (board_m5stack_stopwatch.c: .avatar_px = 384, .avatar_dy = 60; the tape
+   image's own offset is 0, 0). */
+.screen { --px: calc(340px / 466); position: relative; width: 340px; height: 340px; border-radius: 50%; overflow: hidden; background: #000; }
+.screen video { position: absolute; left: calc(41 * var(--px)); top: calc(60 * var(--px)); width: calc(384 * var(--px)); height: calc(384 * var(--px)); object-fit: cover; transition: opacity .125s linear; }
 .screen video.back { opacity: 0; }
 .screen[data-state="off"] video { filter: brightness(.25); }
-.tape { position: absolute; left: 22px; top: 30px; width: 96px; transform: rotate(-8deg); pointer-events: none; }
+/* tape.png is the watch's 279 x 240 image, drawn last there, over the ring and everything else. */
+.tape { position: absolute; left: 0; top: 0; width: calc(279 * var(--px)); z-index: 2; pointer-events: none; }
 .ring { position: absolute; inset: 0; border-radius: 50%; border: 5px solid transparent; pointer-events: none; }
 .screen[data-state="listening"] .ring { border-color: #ffffff55; }
 .screen[data-state="thinking"] .ring { border-color: #ffffffcc; }
