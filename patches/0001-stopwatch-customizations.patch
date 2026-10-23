@@ -41,11 +41,42 @@ index 73c8ffa..cf86355 100644
  
  if(CONFIG_MUSE_ENABLED)
      # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,
+diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
+index 1f65257..05f57fe 100644
+--- a/esp32/components/muse/Kconfig
++++ b/esp32/components/muse/Kconfig
+@@ -156,6 +156,14 @@ menu "Muse"
+         range 0 100
+         default 70
+ 
++    # A quiet amp can take more than full volume: muse_audio_write() raises
++    # everything played by this much into a limiter that holds its peaks at
++    # full scale. 0 leaves the samples untouched.
++    config MUSE_SPEAKER_BOOST_DB
++        int "Gain into the speaker's limiter (dB)"
++        range 0 18
++        default 0
++
+     config MUSE_POWER_TEST
+         bool "Isolated board BSP power-characterization firmware"
+         # Boards implementing boards/muse_power_test_board.h; extend this list
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..c426269 100644
+index 7330e5e..4e55308 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-@@ -615,6 +615,8 @@ static lv_display_t *display_start(lv_indev_t **touch)
+@@ -371,7 +371,10 @@ static esp_err_t ioe_set(uint16_t pins, bool high)
+     return ioe_update(IOE_OUT, pins, high ? pins : 0);
+ }
+ 
+-/* The codec driver switches the amp through this as the speaker opens and closes. */
++/* The codec driver switches the amp through this as the speaker opens and closes. The
++ * AW8737A counts rising edges on SHDN for its mode, but every mode has the same gain (set by
++ * R57/R58, 200 kΩ: ×1.48); one edge, a plain high, is mode 1, the highest output limit
++ * (1.2 W into 8 Ω). M5's firmware drives it the same way. */
+ static int ioe_gpio_setup(int16_t gpio, audio_gpio_dir_t dir, audio_gpio_mode_t mode)
+ {
+     (void)gpio;
+@@ -615,6 +618,8 @@ static lv_display_t *display_start(lv_indev_t **touch)
      esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
      adapter_cfg.task_core_id = MUSE_UI_CORE;
      adapter_cfg.task_priority = MUSE_UI_PRIORITY;
@@ -54,7 +85,20 @@ index 7330e5e..c426269 100644
      if (esp_lv_adapter_init(&adapter_cfg) != ESP_OK) {
          return NULL;
      }
-@@ -1095,7 +1097,18 @@ static const muse_board_t s_board = {
+@@ -917,7 +922,11 @@ static esp_err_t audio_init(esp_codec_dev_handle_t *spk, esp_codec_dev_handle_t
+         .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
+         .pa_pin = SPK_PA_PIN,
+         .use_mclk = true,
+-        .hw_gain = { .pa_voltage = 5.0, .codec_dac_voltage = 3.3 },
++        /* esp_codec_dev takes 20*log10(dac/pa) + pa_gain off the volume's dB; 3.3/5.0 would
++         * put volume 100 at +3.5 dB in the DAC (0xC6), hard-clipping peaks above -3.5 dBFS.
++         * Equal voltages keep volume 100 at 0 dB (0xBF); the extra loudness comes from
++         * muse_audio_write()'s limiter (CONFIG_MUSE_SPEAKER_BOOST_DB) instead. */
++        .hw_gain = { .pa_voltage = 3.3, .codec_dac_voltage = 3.3 },
+     };
+     const audio_codec_if_t *codec = es8311_codec_new(&s_es_cfg);
+     ESP_RETURN_ON_FALSE(codec, ESP_FAIL, TAG, "ES8311 not responding");
+@@ -1095,7 +1104,18 @@ static const muse_board_t s_board = {
      .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
@@ -1585,6 +1629,84 @@ index a3b618e..b50ceb1 100644
    78/esp_lcd_nv3023:
      version: "1.0.1"
      rules:
+diff --git a/esp32/components/muse/muse_audio.c b/esp32/components/muse/muse_audio.c
+index bb4b0d2..8af76b7 100644
+--- a/esp32/components/muse/muse_audio.c
++++ b/esp32/components/muse/muse_audio.c
+@@ -50,6 +50,17 @@ static int16_t s_out_stereo[MUSE_AUDIO_CHUNK * CHANNELS];
+ static float s_hpf_a;
+ static float s_hpf_x1, s_hpf_y1;
+ 
++/* Speaker boost into a peak limiter (CONFIG_MUSE_SPEAKER_BOOST_DB). The envelope jumps to a
++ * peak over the ceiling, so nothing passes it, and falls back over ~150 ms: slow enough
++ * that a voice's pitch periods don't modulate the gain. */
++#if CONFIG_MUSE_SPEAKER_BOOST_DB
++#define BOOST ((float)pow(10.0, CONFIG_MUSE_SPEAKER_BOOST_DB / 20.0))
++#define LIMIT (0.891f * 32767.0f)                         /* -1 dBFS */
++#define RELEASE ((float)exp(-1.0 / (0.15 * MUSE_AUDIO_RATE)))
++static float s_env = LIMIT;
++static float s_env_max = LIMIT;                           /* since muse_audio_take_limiting() */
++#endif
++
+ static void lock(void)
+ {
+     if (s_lock) {
+@@ -359,8 +370,16 @@ esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
+     while (frames) {
+         size_t n = frames > MUSE_AUDIO_CHUNK ? MUSE_AUDIO_CHUNK : frames;
+         for (size_t i = 0; i < n; i++) {
+-            s_out_stereo[2 * i] = mute ? 0 : mono[i];
+-            s_out_stereo[2 * i + 1] = mute ? 0 : mono[i];
++            int16_t v = mute ? 0 : mono[i];
++#if CONFIG_MUSE_SPEAKER_BOOST_DB
++            float x = v * BOOST;
++            float a = fabsf(x);
++            s_env = a > s_env ? a : LIMIT + (s_env - LIMIT) * RELEASE;
++            s_env_max = s_env > s_env_max ? s_env : s_env_max;
++            v = (int16_t)(x * (LIMIT / s_env));
++#endif
++            s_out_stereo[2 * i] = v;
++            s_out_stereo[2 * i + 1] = v;
+         }
+         if (esp_codec_dev_write(s_spk, s_out_stereo, n * CHANNELS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+             return ESP_FAIL;
+@@ -371,6 +390,17 @@ esp_err_t muse_audio_write(const int16_t *mono, size_t frames)
+     return ESP_OK;
+ }
+ 
++float muse_audio_take_limiting(void)
++{
++#if CONFIG_MUSE_SPEAKER_BOOST_DB
++    float db = 20.0f * log10f(s_env_max / LIMIT);
++    s_env_max = LIMIT;
++    return db;
++#else
++    return 0;
++#endif
++}
++
+ float muse_audio_dbfs(const int16_t *mono, size_t frames)
+ {
+     if (!frames) {
+diff --git a/esp32/components/muse/muse_audio.h b/esp32/components/muse/muse_audio.h
+index ed115e8..7c55a4e 100644
+--- a/esp32/components/muse/muse_audio.h
++++ b/esp32/components/muse/muse_audio.h
+@@ -49,9 +49,13 @@ void muse_audio_loopback_test(int volume);
+ /* Blocking read of `frames` mono samples (mic pair mixed down). */
+ esp_err_t muse_audio_read(int16_t *mono, size_t frames);
+ 
+-/* Blocking write of `frames` mono samples to the speaker. */
++/* Blocking write of `frames` mono samples to the speaker, raised by
++ * CONFIG_MUSE_SPEAKER_BOOST_DB into a -1 dBFS limiter. */
+ esp_err_t muse_audio_write(const int16_t *mono, size_t frames);
+ 
++/* The most the limiter cut (dB) since the last call; 0 with no boost. */
++float muse_audio_take_limiting(void);
++
+ /* RMS of a buffer in dBFS (-100 for silence). */
+ float muse_audio_dbfs(const int16_t *mono, size_t frames);
+ 
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
 index ddf486b..903cc96 100644
 --- a/esp32/components/muse/muse_board.h
@@ -1621,10 +1743,10 @@ index ddf486b..903cc96 100644
      /* Power rails, buses, expanders. Runs first. */
      esp_err_t (*init)(void);
 diff --git a/esp32/components/muse/muse_chat_priv.h b/esp32/components/muse/muse_chat_priv.h
-index 855b101..9f3cd8e 100644
+index 855b101..20e8365 100644
 --- a/esp32/components/muse/muse_chat_priv.h
 +++ b/esp32/components/muse/muse_chat_priv.h
-@@ -69,9 +69,20 @@ static inline void muse_chat_reject(muse_chat_rejected_t *rejected, const char *
+@@ -69,9 +69,21 @@ static inline void muse_chat_reject(muse_chat_rejected_t *rejected, const char *
      memcpy(rejected->ids[rejected->count++], id, len + 1);
  }
  
@@ -1635,9 +1757,10 @@ index 855b101..9f3cd8e 100644
 + * backslashes: it's pasted into the JSON as it is.
 + */
 +#define MUSE_VOICE_NOTE_STYLE \
-+    "This voice note is from my StopWatch, which reads your reply aloud on a small speaker. " \
++    "This voice note comes through my voice assistant, which reads your reply aloud. " \
 +    "Answer in one to three short spoken sentences of plain text, like talking. " \
-+    "Never number or bullet anything, and use no headings, dashes, emoji or markdown."
++    "Never number or bullet anything, and use no headings, dashes, emoji or markdown. " \
++    "Don't bring up the device you're speaking through unless I ask about it."
 +
  /* A voice note is a POST /chat/stream body: NOTE_HEAD, a base64 WAV, NOTE_TAIL. */
  #define MUSE_HATCH_NOTE_HEAD \
@@ -1646,7 +1769,7 @@ index 855b101..9f3cd8e 100644
      "\"mime_type\":\"audio/wav\",\"filename\":\"voice_note.wav\",\"data_base64\":\""
  #define MUSE_HATCH_NOTE_TAIL "\"}]}"
  #define MUSE_HATCH_WAV_HEADER 44
-@@ -87,6 +98,13 @@ size_t muse_hatch_base64(const uint8_t *in, size_t n, char *out);
+@@ -87,6 +99,13 @@ size_t muse_hatch_base64(const uint8_t *in, size_t n, char *out);
  void muse_hatch_tail_words(const char *src, char *out, size_t cap);
  bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap);
  
@@ -1661,7 +1784,7 @@ index 855b101..9f3cd8e 100644
  }
  #endif
 diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
-index 2866f5d..9151c26 100644
+index 2866f5d..36f5751 100644
 --- a/esp32/components/muse/muse_chat_session.cpp
 +++ b/esp32/components/muse/muse_chat_session.cpp
 @@ -67,8 +67,11 @@ extern "C" {
@@ -1757,7 +1880,7 @@ index 2866f5d..9151c26 100644
 + * (muse_hatch_strip_tags). Gemini would read them aloud, so it never gets them.
 + */
 +static const char SPEECH_TAG_HINT[] =
-+    "\n\n(Your reply is spoken aloud from my watch, so talk like a person, not a document: short "
++    "\n\n(Your reply is spoken aloud, so talk like a person, not a document: short "
 +    "sentences, contractions, no lists, markdown or emoji. The voice acts out tags, so use them the way "
 +    "people really sound, only where the moment calls for it: usually one or two a reply, often none. "
 +    "[laugh] or [chuckle] after something funny, [pause] before a punchline or a surprise, [sigh] for "
@@ -1765,9 +1888,9 @@ index 2866f5d..9151c26 100644
 +    "or an aside, <emphasis>...</emphasis> on the one word that matters, <soft>...</soft> for something "
 +    "gentle, <slow>...</slow> for something important. Also: [long-pause] [giggle] [inhale] [exhale] "
 +    "[tsk] <loud> <fast> <sing-song>. Wrap only a short phrase, never stack tags, never mention them. "
-+    "My face can react too: put [face-joy] (hops with joy), [face-thinking], [face-sad] (shakes its "
-+    "head) or [face-goodnight] (waves, then falls asleep: only to end a goodnight or goodbye) right "
-+    "where the feeling starts, at most one or two a reply.)";
++    "A face can react on screen too: put [face-joy] (hops with joy), [face-thinking], [face-sad] "
++    "(shakes its head) or [face-goodnight] (waves, then falls asleep: only to end a goodnight or "
++    "goodbye) right where the feeling starts, at most one or two a reply, and never talk about it.)";
 +
 +/*
 + * MUSE_HATCH_NOTE_HEAD with the speech-tag hint added to the voice note's
@@ -2288,12 +2411,13 @@ index a79641d..cf4c3e1 100644
  
 diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
 new file mode 100644
-index 0000000..3bc7547
+index 0000000..44860b7
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.c
-@@ -0,0 +1,847 @@
+@@ -0,0 +1,861 @@
 +#include "muse_gemini_tts.h"
 +
++#include <math.h>
 +#include <stdatomic.h>
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -2382,6 +2506,8 @@ index 0000000..3bc7547
 +    int64_t t0;
 +    int64_t first_audio_us;
 +    size_t pcm_bytes;
++    uint64_t pcm_sq;                         /* the speech's level, for the log */
++    int pcm_peak;
 +    bool refused;                            /* HTTP 4xx, or an API error event */
 +    /* Down to the speaker's rate: the API sends 24 kHz whatever sample_rate asks for. */
 +    int rate;
@@ -2627,6 +2753,11 @@ index 0000000..3bc7547
 +
 +static void put_pcm(const uint8_t *pcm, size_t n)
 +{
++    for (size_t i = 0; i + 1 < n; i += 2) {
++        int v = (int16_t)(pcm[i] | pcm[i + 1] << 8);
++        r.pcm_sq += (uint64_t)(v * v);
++        r.pcm_peak = abs(v) > r.pcm_peak ? abs(v) : r.pcm_peak;
++    }
 +    if (!r.first_audio_us) {
 +        r.first_audio_us = now_us();
 +    }
@@ -2960,6 +3091,8 @@ index 0000000..3bc7547
 +    r.t0 = now_us();
 +    r.first_audio_us = 0;
 +    r.pcm_bytes = 0;
++    r.pcm_sq = 0;
++    r.pcm_peak = 0;
 +    r.refused = false;
 +    s_sentence++;
 +
@@ -2994,6 +3127,10 @@ index 0000000..3bc7547
 +             r.first_audio_us ? (int)((r.first_audio_us - r.t0) / 1000) : -1,
 +             (double)r.pcm_bytes / 2 / MUSE_GEMINI_TTS_RATE, (now_us() - r.t0) / 1e6,
 +             res == REQ_OK ? "" : " (failed)");
++    if (r.pcm_bytes) {
++        ESP_LOGI(TAG, "speech level: peak %.1f dBFS, rms %.1f dBFS", 20.0 * log10((r.pcm_peak + 1) / 32768.0),
++                 10.0 * log10((double)r.pcm_sq / (r.pcm_bytes / 2) / (32768.0 * 32768.0) + 1e-10));
++    }
 +}
 +
 +static void worker(void *arg)
@@ -3209,7 +3346,7 @@ index 0000000..4e10649
 +}
 +#endif
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 5a60abf..7e47c61 100644
+index 5a60abf..70226f0 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -45,6 +45,9 @@
@@ -3350,6 +3487,15 @@ index 5a60abf..7e47c61 100644
              muse_board->wait_buttons(napping ? NAP_WAIT_MS : REST_WAIT_MS);
          } else {
              vTaskDelay(pdMS_TO_TICKS(paused ? REST_POLL_MS : POLL_MS));
+@@ -676,7 +734,7 @@ static void set_face(const char *name)
+     muse_state_poke();
+     bool happy = !strcmp(name, "happy");
+     if (happy) {
+-        name = "idle";   /* where a finished turn hops to */
++        name = "idle";   /* where a pet plays the happy hop */
+     }
+     for (int m = 0; m < MUSE_MODE_COUNT; m++) {
+         if (!strcmp(name, modes[m])) {
 diff --git a/esp32/components/muse/muse_pixel.h b/esp32/components/muse/muse_pixel.h
 index fe603d8..6e8c2ec 100644
 --- a/esp32/components/muse/muse_pixel.h
@@ -3547,7 +3693,7 @@ index 6a372ac..571658d 100644
  
  /* ---------- Battery ---------- */
 diff --git a/esp32/components/muse/muse_state.c b/esp32/components/muse/muse_state.c
-index 27377e2..e2dd36d 100644
+index 27377e2..7a96720 100644
 --- a/esp32/components/muse/muse_state.c
 +++ b/esp32/components/muse/muse_state.c
 @@ -38,6 +38,8 @@ static volatile float s_level;
@@ -3559,17 +3705,24 @@ index 27377e2..e2dd36d 100644
  static volatile bool s_asleep;
  
  static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
-@@ -78,6 +80,9 @@ void muse_state_set_mode(muse_mode_t mode)
+@@ -76,7 +78,16 @@ void muse_state_set_mode(muse_mode_t mode)
+     if (s_mode == MUSE_MODE_OFF && mode != MUSE_MODE_IDLE) {
+         return;
      }
++    bool was_reply = s_mode == MUSE_MODE_THINKING || s_mode == MUSE_MODE_SPEAKING;
++    bool is_reply = mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING;
      s_mode_since_us = esp_timer_get_time();
-     s_mode = mode;
-+    if (mode != MUSE_MODE_THINKING && mode != MUSE_MODE_SPEAKING) {
++    if (was_reply && mode == MUSE_MODE_IDLE && s_reaction != MUSE_REACT_NONE) {
++        /* The reply's last face is its ending: it plays once more from now,
++         * over idle, and no further (the avatar times it out). */
++        s_reaction_us = s_mode_since_us;
++    } else if (!(was_reply && is_reply)) {
 +        s_reaction = MUSE_REACT_NONE;   /* a reply's faces end with it */
 +    }
+     s_mode = mode;
  }
  
- muse_mode_t muse_state_mode(float *secs_in_mode)
-@@ -231,6 +236,22 @@ void muse_state_nudge(void)
+@@ -231,6 +242,22 @@ void muse_state_nudge(void)
      xEventGroupSetBits(s_wake, NUDGE_BIT);
  }
  
@@ -3593,7 +3746,7 @@ index 27377e2..e2dd36d 100644
  {
      s_happy_until_us = esp_timer_get_time() + (int64_t)(HAPPY_SECS * 1e6f);
 diff --git a/esp32/components/muse/muse_state.h b/esp32/components/muse/muse_state.h
-index ecea3fe..b722619 100644
+index ecea3fe..123e386 100644
 --- a/esp32/components/muse/muse_state.h
 +++ b/esp32/components/muse/muse_state.h
 @@ -58,6 +58,9 @@ float muse_state_progress(void);
@@ -3606,13 +3759,15 @@ index ecea3fe..b722619 100644
  
  void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  /* Copies the caption if it changed since *version; returns true on change. */
-@@ -95,3 +98,16 @@ void muse_state_nudge(void);
+@@ -95,3 +98,18 @@ void muse_state_nudge(void);
  /* Touch/pet reaction. */
  void muse_state_make_happy(void);
  float muse_state_happiness(void);
 +
 +/* A face Muse asks for in its reply ("[face-joy]"), played over the speaking
-+ * one. It lasts until the next turn starts or the reply is over. */
++ * one. It lasts until the reply is over, and the last one also ends the reply:
++ * going idle restarts its clock, so it plays once more over idle (a reply with
++ * no face ends on idle alone). Any other mode, or the next turn, clears it. */
 +typedef enum {
 +    MUSE_REACT_NONE,
 +    MUSE_REACT_JOY,
@@ -4356,7 +4511,7 @@ index d0d4e2f..daf7d2e 100644
      muse_pixel_render(&pose);
      invalidate_muse();
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 38c7c9d..8767c26 100644
+index 38c7c9d..a64fc3f 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
 @@ -238,6 +238,12 @@ static void take(rec_stats_t *st, const int16_t *pcm)
@@ -4410,7 +4565,13 @@ index 38c7c9d..8767c26 100644
      static int16_t buf[MUSE_AUDIO_CHUNK];
      static const int16_t silence[MUSE_AUDIO_CHUNK];
      char text[96];
-@@ -361,14 +369,14 @@ static bool hatch_reply(bool *delivered)
+@@ -356,19 +364,20 @@ static bool hatch_reply(bool *delivered)
+     size_t played = 0;
+     int64_t t0 = esp_timer_get_time();
+     *delivered = false;
++    muse_audio_take_limiting();   /* this reply's own */
+     for (;;) {
+         muse_hatch_ev_t ev;
          while ((ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
              switch (ev) {
              case MUSE_HATCH_EV_HEARD:
@@ -4427,7 +4588,19 @@ index 38c7c9d..8767c26 100644
                  }
                  break;
              case MUSE_HATCH_EV_REPLY:
-@@ -639,7 +647,7 @@ static bool send_held(bool quiet)
+@@ -420,8 +429,9 @@ static bool hatch_reply(bool *delivered)
+         }
+     }
+     muse_state_set_level(0);
+-    ESP_LOGI(TAG, "muse reply: %.2fs of audio, %.2fs total", (double)played / MUSE_AUDIO_RATE,
+-             (esp_timer_get_time() - t0) / 1e6);
++    ESP_LOGI(TAG, "muse reply: %.2fs of audio, %.2fs total, boost %d dB, limiter cut up to %.1f dB",
++             (double)played / MUSE_AUDIO_RATE, (esp_timer_get_time() - t0) / 1e6, CONFIG_MUSE_SPEAKER_BOOST_DB,
++             muse_audio_take_limiting());
+     if (!played) {
+         /* No speech (TTS unavailable): leave the reply text up for a moment. */
+         vTaskDelay(pdMS_TO_TICKS(2500));
+@@ -639,7 +649,7 @@ static bool send_held(bool quiet)
               h->tries + 1);
      if (!quiet) {
          muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4436,7 +4609,7 @@ index 38c7c9d..8767c26 100644
      }
      muse_hatch_turn_begin();
      size_t sent = 0;
-@@ -665,7 +673,7 @@ static bool send_held(bool quiet)
+@@ -665,7 +675,7 @@ static bool send_held(bool quiet)
          s_next_send_us = 0;   /* the next one right away */
          s_send_backoff_us = RETRY_MIN_US;
          if (quiet) {
@@ -4445,7 +4618,7 @@ index 38c7c9d..8767c26 100644
          }
          return interrupted;
      } else if (++h->tries >= HELD_TRIES) {
-@@ -728,7 +736,7 @@ static bool finish_note(void)
+@@ -728,7 +738,7 @@ static bool finish_note(void)
          if (s_live && !fed) {
              /* Hatch is behind (still connecting, say): the rest from the kept note. */
              muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4454,14 +4627,34 @@ index 38c7c9d..8767c26 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
+@@ -806,7 +816,6 @@ static void voice_task(void *arg)
+                 pending_down = send_held(asleep);
+                 pre_reset();
+                 if (!pending_down && !asleep && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+-                    muse_state_make_happy();
+                     go_idle("");
+                 }
+                 continue;
+@@ -880,8 +889,9 @@ static void voice_task(void *arg)
+         }
+         pending_down = finish_note();
+         pre_reset();
++        /* A reply ends on its own last face, or on idle: not the pet hop,
++         * which would be wrong after a sad or serious answer. */
+         if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
+-            muse_state_make_happy();
+             go_idle("");
+         }
+     }
 diff --git a/esp32/components/muse/muse_xai_tts.c b/esp32/components/muse/muse_xai_tts.c
 new file mode 100644
-index 0000000..ddddeaa
+index 0000000..c7041c9
 --- /dev/null
 +++ b/esp32/components/muse/muse_xai_tts.c
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,892 @@
 +#include "muse_xai_tts.h"
 +
++#include <math.h>
 +#include <stdatomic.h>
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -4575,6 +4768,8 @@ index 0000000..ddddeaa
 +    size_t chars;
 +    int64_t t0, first_audio_us, last_rx_us;
 +    size_t pcm_bytes;
++    uint64_t pcm_sq;                         /* the speech's level, for the log */
++    int pcm_peak;
 +    uint8_t odd;
 +    bool have_odd;
 +} r;
@@ -4925,6 +5120,11 @@ index 0000000..ddddeaa
 +
 +static void put_pcm(const uint8_t *pcm, size_t n)
 +{
++    for (size_t i = 0; i + 1 < n; i += 2) {
++        int v = (int16_t)(pcm[i] | pcm[i + 1] << 8);
++        r.pcm_sq += (uint64_t)(v * v);
++        r.pcm_peak = abs(v) > r.pcm_peak ? abs(v) : r.pcm_peak;
++    }
 +    if (!r.first_audio_us) {
 +        r.first_audio_us = now_us();
 +    }
@@ -5000,6 +5200,10 @@ index 0000000..ddddeaa
 +             r.first_audio_us ? (int)((r.first_audio_us - r.t0) / 1000) : -1,
 +             (double)r.pcm_bytes / 2 / MUSE_GEMINI_TTS_RATE, (now_us() - r.t0) / 1e6, why ? " (" : "",
 +             why ? why : "", why ? ")" : "");
++    if (r.pcm_bytes) {
++        ESP_LOGI(TAG, "speech level: peak %.1f dBFS, rms %.1f dBFS", 20.0 * log10((r.pcm_peak + 1) / 32768.0),
++                 10.0 * log10((double)r.pcm_sq / (r.pcm_bytes / 2) / (32768.0 * 32768.0) + 1e-10));
++    }
 +}
 +
 +static void on_message(char *json)
@@ -5401,10 +5605,10 @@ index 0000000..61f281b
 +}
 +#endif
 diff --git a/esp32/devices/sdkconfig.muse-m5stack-stopwatch b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
-index 3aef13f..1ca3849 100644
+index 3aef13f..be18e55 100644
 --- a/esp32/devices/sdkconfig.muse-m5stack-stopwatch
 +++ b/esp32/devices/sdkconfig.muse-m5stack-stopwatch
-@@ -68,3 +68,15 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+@@ -68,3 +68,21 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
  # actually slept, and how long each power lock kept the chip awake.
  CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
  CONFIG_PM_PROFILING=y
@@ -5420,6 +5624,12 @@ index 3aef13f..1ca3849 100644
 +# Internal RAM is the scarce resource. Unread TCP data waits in Wi-Fi RX buffers, which must be
 +# internal; 16 caps that backlog at ~26 KB. The SDK pins the TCP window at 16384 for the tunnel.
 +CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
++
++# The speaker is quiet: the AW8737A's 200 kΩ input resistors (R57/R58) give it ×1.48, so full-scale
++# PCM drives ~0.2 W of its 1.2 W. Full volume until one is saved in Settings, and speech raised
++# 12 dB into a limiter (muse_audio_write) so its average level, not just its peaks, nears full scale.
++CONFIG_MUSE_DEFAULT_VOLUME=100
++CONFIG_MUSE_SPEAKER_BOOST_DB=12
 diff --git a/esp32/main/app.c b/esp32/main/app.c
 index b7f076d..1ea183c 100644
 --- a/esp32/main/app.c
@@ -5611,22 +5821,94 @@ index 0000000..a31cd56
 +# in the 16 MB flash's otherwise unused upper half, to its end.
 +anims,     data, 0x99,    0x830000, 0x7D0000,
 diff --git a/esp32/tests/test_muse_voice_note.py b/esp32/tests/test_muse_voice_note.py
-index 8403bec..5d19425 100644
+index 8403bec..9fb93dc 100644
 --- a/esp32/tests/test_muse_voice_note.py
 +++ b/esp32/tests/test_muse_voice_note.py
-@@ -48,7 +48,10 @@ def riff_header(rate):
+@@ -20,6 +20,7 @@ import base64
+ import io
+ import json
+ import os
++import pathlib
+ import random
+ import shlex
+ import struct
+@@ -48,7 +49,11 @@ def riff_header(rate):
  
  # The POST /chat/stream envelope around the base64 WAV, written out rather than
  # read from muse_chat_priv.h: changing what the device sends must change this.
 -HEAD = (b'{"message":"","output_modality":"text","items":[{"type":"file",'
-+STYLE = (b'This voice note is from my StopWatch, which reads your reply aloud on a small speaker. '
++STYLE = (b'This voice note comes through my voice assistant, which reads your reply aloud. '
 +         b'Answer in one to three short spoken sentences of plain text, like talking. '
-+         b'Never number or bullet anything, and use no headings, dashes, emoji or markdown.')
++         b'Never number or bullet anything, and use no headings, dashes, emoji or markdown. '
++         b"Don't bring up the device you're speaking through unless I ask about it.")
 +HEAD = (b'{"message":"' + STYLE + b'","output_modality":"text","items":[{"type":"file",'
          b'"mime_type":"audio/wav","filename":"voice_note.wav","data_base64":"')
  TAIL = b'"}]}'
  
-@@ -198,7 +201,7 @@ class VoiceNoteHelpers(unittest.TestCase):
+@@ -64,11 +69,61 @@ def expected_parts(wav_len, part_pcm, part_chars):
+     return [len(HEAD)] + [part_chars] * full + [(rest + 2) // 3 * 4 + len(TAIL)]
+ 
+ 
++# ESP-IDF headers the sources include that host_compat.h can't stand in for,
++# since an #include needs a file: written next to the binary at compile time.
++HOST_HEADERS = {
++    'esp_heap_caps.h': '#pragma once\n#include <stdlib.h>\n'
++                       '#define MALLOC_CAP_8BIT 0\n#define MALLOC_CAP_SPIRAM 0\n#define MALLOC_CAP_INTERNAL 0\n'
++                       '#define heap_caps_malloc(n, caps) malloc(n)\n',
++}
++
++
++# note_head() builds the request's head with cJSON and adds the speech-tag hint
++# while xAI speaks: these fakes keep the hint off, so the head is exactly
++# MUSE_HATCH_NOTE_HEAD, and quote the message as cJSON would (the style needs
++# no escaping).
++NOTE_FAKES = r"""
++static bool muse_settings_speaker_on(void) { return false; }
++static bool muse_xai_tts_configured(void) { return false; }
++typedef struct cJSON { char *valuestring; } cJSON;
++static cJSON *cJSON_CreateString(const char *s)
++{
++    cJSON *j = static_cast<cJSON *>(malloc(sizeof *j));
++    j->valuestring = strdup(s);
++    return j;
++}
++static char *cJSON_SetValuestring(cJSON *j, const char *s)
++{
++    free(j->valuestring);
++    return j->valuestring = strdup(s);
++}
++static char *cJSON_PrintUnformatted(const cJSON *j)
++{
++    size_t n = strlen(j->valuestring) + 3;
++    char *out = static_cast<char *>(malloc(n));
++    snprintf(out, n, "\"%s\"", j->valuestring);
++    return out;
++}
++static void cJSON_Delete(cJSON *j)
++{
++    if (j) {
++        free(j->valuestring);
++        free(j);
++    }
++}
++static void *cJSON_malloc(size_t n) { return malloc(n); }
++static void cJSON_free(void *p) { free(p); }
++"""
++
+ def compile_c(out, sources):
+     cc = shlex.split(os.environ.get('CC', 'cc'))
++    inc = pathlib.Path(out).parent / 'host_include'
++    inc.mkdir(exist_ok=True)
++    for name, text in HOST_HEADERS.items():
++        (inc / name).write_text(text)
+     result = subprocess.run(
+         [*cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', *SANITIZE,
+-         '-include', str(ROOT / 'tests/host_compat.h'), '-I', str(MUSE),
++         '-include', str(ROOT / 'tests/host_compat.h'), '-I', str(MUSE), '-I', str(inc),
+          *map(str, sources), '-o', str(out)],
+         capture_output=True, text=True)
+     if result.returncode:
+@@ -198,7 +253,7 @@ class VoiceNoteHelpers(unittest.TestCase):
          self.assertEqual(body, HEAD + base64.b64encode(riff_header(16000) + pcm) + TAIL)
          request = json.loads(body)
          wav = base64.b64decode(request['items'][0].pop('data_base64'), validate=True)
@@ -5635,3 +5917,20 @@ index 8403bec..5d19425 100644
              {'type': 'file', 'mime_type': 'audio/wav', 'filename': 'voice_note.wav'}]})
          self.assertEqual(wav, riff_header(16000) + pcm)
          with wave.open(io.BytesIO(wav)) as w:
+@@ -328,10 +383,14 @@ class HatchVoiceNote(NoteRequestAssertions, unittest.TestCase):
+ /* Not assert(): the fakes must still check under -DNDEBUG. */
+ #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); exit(3); } } while (0)
+ typedef struct fake_stream *StreamBufferHandle_t;
+-''' + constants + line('enum kind_t') + line('enum mark_t') + types + HATCH_DRIVER + note + HATCH_MAIN
++''' + constants + line('enum kind_t') + line('enum mark_t') + types + HATCH_DRIVER + NOTE_FAKES + note + HATCH_MAIN
+         (out / 'note.cpp').write_text(code)
++        inc = out / 'host_include'
++        inc.mkdir(exist_ok=True)
++        for name, text in HOST_HEADERS.items():
++            (inc / name).write_text(text)
+         flags = ['-Wall', '-Wextra', '-Werror', *SANITIZE,
+-                 '-I', str(ROOT / 'tests'), '-I', str(MUSE),
++                 '-I', str(ROOT / 'tests'), '-I', str(MUSE), '-I', str(inc),
+                  '-I', str(ROOT / 'components/minimp3/include')]
+         cc = shlex.split(os.environ.get('CC', 'cc'))
+         cxx = shlex.split(os.environ.get('CXX', 'c++'))

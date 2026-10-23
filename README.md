@@ -228,6 +228,9 @@ leaves speech to "a text-to-speech API of your choice". The patch adds:
     thinking, error or goodbye clip over the speaking one (`muse_state_react()`, `clip_for()` in
     `avatar/character/muse_pixel.c`) and are cut out before the voice. The captions leave every tag
     out. A wrapping tag is never split across the pieces sent to xAI.
+  - **How a reply ends:** with its last face, played once more as the watch goes idle (a sad
+    answer ends sad, not on a hop), then the idle clip. A reply with no face just settles back to
+    idle. Finishing a reply never plays the tap reaction.
   - Each reply logs its timing, as
     `reply (N sentences, N chars, kept connection): first audio N ms, Ns of speech in Ns`.
 - **`main/muse_glue.c`:** routes the `>gemini_key=` and `>xai_key=` serial commands.
@@ -276,6 +279,9 @@ state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind 
 - **Clips:** `avatar/character/clips/` holds wake, idle, listening, thinking, speaking, happy, error
   and goodbye `.mp4`s (16:9, the character centred on black). Wake and goodbye play once and hold
   their last frame. The others loop.
+- **Tapping the character** waves back: 1.2 s of goodbye's wave (frames 32–61, before the eyes
+  close), held on its last frame until the tap reaction ends (`CLIP_WAVE` in
+  `avatar/character/muse_pixel.c`). The happy hop is kept for `[face-joy]`.
 - **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow,
   `avatar/requirements.txt`) crops each clip to
   its centre square at 256 px and 24 fps, makes the near-black background true black, sharpens it a

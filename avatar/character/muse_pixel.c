@@ -52,14 +52,20 @@ static const char *TAG = "muse_anim";
 #define WANT_GEN(w) ((w) >> 18)
 
 enum { CLIP_WAKE, CLIP_IDLE, CLIP_LISTENING, CLIP_THINKING, CLIP_SPEAKING, CLIP_HAPPY, CLIP_ERROR,
-       CLIP_GOODBYE, CLIP_COUNT };
+       CLIP_GOODBYE, CLIP_COUNT,
+       CLIP_WAVE = CLIP_COUNT };   /* not in the pack: the wave out of goodbye, for a tap */
+
+/* Goodbye's wave, at 24 fps: the arm comes up 1.35 s in and is still waving at
+ * 2.55 s, just before the eyes start to close for sleep. */
+#define WAVE_FIRST 32
+#define WAVE_FRAMES 30
 
 typedef struct {
     uint16_t first, count, flags, pad;
 } clip_t;
 
 static const esp_partition_t *s_part;
-static clip_t s_clips[CLIP_COUNT];
+static clip_t s_clips[CLIP_COUNT + 1];
 static uint32_t *s_index;            /* (offset, size) per frame, copied to RAM */
 static uint32_t s_frames;
 static uint8_t *s_jpeg;              /* the frame being decoded, read from flash */
@@ -146,6 +152,12 @@ static bool open_pack(void)
             return false;
         }
     }
+    /* Played once, holding its last frame (arm up, eyes open) until the tap
+     * reaction is over. A shorter goodbye just waves for what it has. */
+    const clip_t *bye = &s_clips[CLIP_GOODBYE];
+    int from = bye->count > WAVE_FIRST ? WAVE_FIRST : 0;
+    int n = bye->count - from < WAVE_FRAMES ? bye->count - from : WAVE_FRAMES;
+    s_clips[CLIP_WAVE] = (clip_t){ bye->first + from, n, 1, 0 };
     s_index = heap_caps_malloc(s_frames * 8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_index || esp_partition_read(part, sizeof(head), s_index, s_frames * 8) != ESP_OK) {
         ESP_LOGW(TAG, "can't read the frame index");
@@ -357,6 +369,8 @@ static void decoder(void *arg)
 /*
  * The clip for a face Muse asked for in its reply, or -1 once it's played.
  * Goodnight (waving, then asleep) plays once and holds until the reply ends.
+ * Idle right after a reply replays its last face once as the ending
+ * (muse_state.h), goodnight included, then gives way to the idle clip.
  */
 static int reaction_clip(const muse_pose_t *p)
 {
@@ -366,14 +380,15 @@ static int reaction_clip(const muse_pose_t *p)
         [MUSE_REACT_SAD] = CLIP_ERROR,
         [MUSE_REACT_GOODNIGHT] = CLIP_GOODBYE,
     };
+    bool ending = p->mode == MUSE_MODE_IDLE;
     if (p->reaction <= MUSE_REACT_NONE || p->reaction > MUSE_REACT_GOODNIGHT ||
-        (p->mode != MUSE_MODE_SPEAKING && p->mode != MUSE_MODE_THINKING)) {
+        (!ending && p->mode != MUSE_MODE_SPEAKING && p->mode != MUSE_MODE_THINKING)) {
         return -1;
     }
     int clip = CLIP_OF[p->reaction];
     float secs = (float)s_clips[clip].count / s_fps;
     secs = secs > REACT_MIN_SECS ? secs : REACT_MIN_SECS;
-    return p->reaction == MUSE_REACT_GOODNIGHT || p->reaction_t < secs ? clip : -1;
+    return (!ending && p->reaction == MUSE_REACT_GOODNIGHT) || p->reaction_t < secs ? clip : -1;
 }
 
 static int clip_for(const muse_pose_t *p)
@@ -383,7 +398,7 @@ static int clip_for(const muse_pose_t *p)
         return face;
     }
     if (p->happy > 0.2f && p->mode != MUSE_MODE_ERROR) {
-        return CLIP_HAPPY;
+        return CLIP_WAVE;   /* a tap waves back; [face-joy] keeps the hop */
     }
     switch (p->mode) {
     case MUSE_MODE_BOOT:      return CLIP_WAKE;
