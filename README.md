@@ -443,10 +443,43 @@ The tape and the battery ring are hidden on the settings pages.
   the committed fallback, with the original "A7·22·10·K" note. By hand:
   `python3 avatar/make_tape.py FONTS_DIR --note "#28·23·10"`.
 
-### Talking: hands-free conversations
+### Talking: live conversations with Grok and Muse
 
-The board file sets `.conversation_talk = true`, so the blue button starts a conversation rather
-than push-to-talk (`converse()` in `muse_voice.c`):
+The board file sets `.live_talk = true` (with `.conversation_talk`), so a long press on blue opens
+a spoken conversation with xAI's live voice (`wss://api.x.ai/v1/realtime`, `muse_live.c`) rather
+than sending voice notes to Muse. It uses the xAI key already stored for speech (`>xai_key=...`);
+without one the watch says "SET AN XAI KEY". It connects only for the conversation.
+
+- **Grok talks; Muse knows.** Grok (voice `iris`, your Muse persona, never mentioning the device)
+  answers small talk and general questions itself. Anything personal (projects, plans, tasks,
+  calendar, notes, shopping) it hands to Muse with its `ask_muse` tool, as a typed Muse turn
+  with a note on answering for the voice and the face tags it may use. Muse's answer, once the
+  conversation is quiet, plays its faces as reactions and is read out word for word in Grok's
+  voice (`force_message`). Grok can show a face itself with `set_mood`.
+- **Who's answering:** Grok's or Muse's logo (22 px, `avatar/icons`, made by
+  `avatar/make_icons.py` and copied in by `build.sh`) shows just left of the battery ring while
+  that one answers, and Muse's while Muse is working on a question.
+- **Turns** end by xAI's voice detection. Every 20 ms the voice task plays a chunk of the reply
+  and reads one from the mic; the mic streams to xAI except while the speaker plays and for
+  300 ms after.
+- **Talking over a reply** (barge-in): with no echo canceller on the board, `muse_echo.c` learns
+  how loud the speaker comes back in the mic (on the StopWatch, about as loud as it's sent) from
+  the first 500 ms of each reply, then takes 120 ms of mic 10 dB over that for a voice. Grok
+  stops, and what you said just before goes to xAI. At full volume the echo is too loud to beat,
+  so it works best in Grok's quieter moments. The log says
+  `barge-in: mic -9 dBFS, the speaker's echo -21` and, after each reply,
+  `the mic hears the speaker at +0.0 dB`.
+- **It ends** on a click, or with nobody talking, nothing playing and nothing waiting on Grok or
+  Muse for 6 s after the press (8 s once there's been a reply), or if the connection fails, whose
+  reason stays up ("CAN'T REACH XAI", "XAI KEY REFUSED", "LOST XAI").
+- The protocol and instructions are the live-voice prototype's (`prototype/live-voice/orchestrator.js`,
+  branch `live-voice-prototype`), which the simulator keeps matching. `tests/test_muse_echo.py`
+  feeds the echo gate a reply's echo, a voice over it and the StopWatch's loud speaker.
+
+### Talking: hands-free voice notes (without live_talk)
+
+With `.conversation_talk` and no `.live_talk`, the blue button starts a hands-free conversation of
+voice notes to Muse (`converse()` in `muse_voice.c`):
 
 ```
  idle ──long press (0.5 s)──► listening ──you speak, then 0.9 s quiet──► thinking ──► speaking

@@ -1,24 +1,30 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 73c8ffa..b9beda8 100644
+index 73c8ffa..8e533b1 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -43,12 +43,22 @@ if(CONFIG_MUSE_ENABLED)
+@@ -43,12 +43,28 @@ if(CONFIG_MUSE_ENABLED)
          "muse_link.c"
          "muse_ble.c")
      if(CONFIG_MUSE_HATCH)
 -        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
-+        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_gemini_tts.c" "muse_xai_tts.c")
++        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_gemini_tts.c" "muse_xai_tts.c"
++                         "muse_ws.c" "muse_live.c")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
      else()
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
      endif()
 -    list(APPEND srcs "muse_chat_text.c")
-+    list(APPEND srcs "muse_chat_text.c" "muse_vad.c")
++    list(APPEND srcs "muse_chat_text.c" "muse_vad.c" "muse_echo.c")
 +    list(APPEND srcs "fonts/muse_font_bold_20.c")   # Montserrat Bold 20, ASCII: the state word
 +    # The MOBOT tape label (board .tape_label), copied here by the project's build.sh.
 +    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/tape.rgb565a8")
 +        list(APPEND embed "tape/tape.rgb565a8")
 +        set(muse_tape ON)
++    endif()
++    # Who's answering in a live conversation: Grok's and Muse's logos (avatar/make_icons.py), copied with the tape.
++    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/grok.rgb565a8" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/muse.rgb565a8")
++        list(APPEND embed "tape/grok.rgb565a8" "tape/muse.rgb565a8")
++        set(muse_logos ON)
 +    endif()
 +    # The build number, written with the tape for each build.
 +    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/build_id.h")
@@ -27,7 +33,7 @@ index 73c8ffa..b9beda8 100644
      if(CONFIG_MUSE_CJK_FONT)
          list(APPEND srcs "fonts/muse_font_cjk_16.c")   # captions' CJK fallback
      endif()
-@@ -122,7 +132,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
+@@ -122,7 +138,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
  endif()
  
  set(muse_priv_requires
@@ -36,12 +42,15 @@ index 73c8ffa..b9beda8 100644
      bt esp-tls mbedtls esp_app_format esp_http_client
      noise_core minimp3
      esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-@@ -138,6 +148,12 @@ idf_component_register(
+@@ -138,6 +154,15 @@ idf_component_register(
      REQUIRES esp_driver_gpio esp_driver_i2c
      PRIV_REQUIRES ${muse_priv_requires}
  )
 +if(muse_build_id)
 +    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_HAS_BUILD_ID=1)
++endif()
++if(muse_logos)
++    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_HAS_LOGOS=1)
 +endif()
 +if(muse_tape)
 +    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_HAS_TAPE=1)
@@ -69,7 +78,7 @@ index 1f65257..05f57fe 100644
          bool "Isolated board BSP power-characterization firmware"
          # Boards implementing boards/muse_power_test_board.h; extend this list
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..1a133e5 100644
+index 7330e5e..cf0abb3 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
 @@ -371,7 +371,10 @@ static esp_err_t ioe_set(uint16_t pins, bool high)
@@ -106,7 +115,7 @@ index 7330e5e..1a133e5 100644
      };
      const audio_codec_if_t *codec = es8311_codec_new(&s_es_cfg);
      ESP_RETURN_ON_FALSE(codec, ESP_FAIL, TAG, "ES8311 not responding");
-@@ -1095,7 +1104,19 @@ static const muse_board_t s_board = {
+@@ -1095,7 +1104,20 @@ static const muse_board_t s_board = {
      .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
@@ -122,6 +131,7 @@ index 7330e5e..1a133e5 100644
 +    .big_reply = true,          /* replies take most of the screen */
 +    .hide_page_dots = true,     /* no page dots: settings are a swipe left */
 +    .conversation_talk = true,  /* long-press blue: hands-free turns until quiet or a click */
++    .live_talk = true,          /* ...with xAI's live voice, and Muse for anything personal */
 +    .hide_state_label = true,   /* the character's animation says what it's doing */
 +    .listen_dots = true,        /* dots while listening, not a timer */
      .init = init,
@@ -1717,10 +1727,10 @@ index ed115e8..7c55a4e 100644
  float muse_audio_dbfs(const int16_t *mono, size_t frames);
  
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index ddf486b..8ec4ed8 100644
+index ddf486b..f9df54a 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
-@@ -88,6 +88,34 @@ typedef struct {
+@@ -88,6 +88,37 @@ typedef struct {
      bool flat_menu_hints;
      int frame_ms;           /* face animation period */
      int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
@@ -1746,6 +1756,9 @@ index ddf486b..8ec4ed8 100644
 +     * turn ends when you go quiet (muse_vad.c), the next starts after the reply, and it
 +     * ends after a quiet spell or a click (muse_voice.c, converse()). */
 +    bool conversation_talk;
++    /* With conversation_talk: the conversation is with xAI's live voice (muse_live.c), which
++     * hands personal questions to Muse, instead of voice notes to Muse. Needs an xAI key. */
++    bool live_talk;
 +    /* The MOBOT tape label across the top-left, like a sticker on the glass (tape.rgb565a8). */
 +    bool tape_label;
 +    /* A battery ring (charge as its fill, colour by level, green while charging) at this spot,
@@ -1755,8 +1768,27 @@ index ddf486b..8ec4ed8 100644
  
      /* Power rails, buses, expanders. Runs first. */
      esp_err_t (*init)(void);
+diff --git a/esp32/components/muse/muse_chat.h b/esp32/components/muse/muse_chat.h
+index b10e9d8..bc008ac 100644
+--- a/esp32/components/muse/muse_chat.h
++++ b/esp32/components/muse/muse_chat.h
+@@ -140,6 +140,14 @@ void muse_hatch_text_cancel(void);
+  */
+ void muse_hatch_console(const char *type, const char *text, const char *fields, ...)
+     __attribute__((format(printf, 3, 4)));
++
++/*
++ * Also hands each "@chat" frame, whole, to `sink` (NULL for none), on the chat
++ * task: its type, its text (or NULL) and its other fields as printed (or "").
++ * muse_live.c reads Muse's answers this way.
++ */
++typedef void (*muse_hatch_console_sink_t)(const char *type, const char *text, const char *fields);
++void muse_hatch_set_console_sink(muse_hatch_console_sink_t sink);
+ /* Undoes the escapes in a line typed at the console (\n \r \t \\) in place; returns the length. */
+ size_t muse_hatch_unescape(char *s);
+ 
 diff --git a/esp32/components/muse/muse_chat_priv.h b/esp32/components/muse/muse_chat_priv.h
-index 855b101..20e8365 100644
+index 855b101..c83fd7b 100644
 --- a/esp32/components/muse/muse_chat_priv.h
 +++ b/esp32/components/muse/muse_chat_priv.h
 @@ -69,9 +69,21 @@ static inline void muse_chat_reject(muse_chat_rejected_t *rejected, const char *
@@ -1782,7 +1814,7 @@ index 855b101..20e8365 100644
      "\"mime_type\":\"audio/wav\",\"filename\":\"voice_note.wav\",\"data_base64\":\""
  #define MUSE_HATCH_NOTE_TAIL "\"}]}"
  #define MUSE_HATCH_WAV_HEADER 44
-@@ -87,6 +99,13 @@ size_t muse_hatch_base64(const uint8_t *in, size_t n, char *out);
+@@ -87,6 +99,20 @@ size_t muse_hatch_base64(const uint8_t *in, size_t n, char *out);
  void muse_hatch_tail_words(const char *src, char *out, size_t cap);
  bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap);
  
@@ -1793,11 +1825,18 @@ index 855b101..20e8365 100644
 +/* The length of the speech tag at `p`, or 0 if there isn't one there. */
 +size_t muse_hatch_tag_len(const char *p);
 +
++/* muse_chat_session.cpp's cleanup of a reply for the voice: face tags
++ * ("[face-joy]") are played (muse_state_react) and cut out of `s`, and
++ * speakable() drops list marks, markdown and emoji from `in` into `out`
++ * (at least `len` + 1 bytes). Each returns the new length. */
++size_t muse_hatch_take_faces(char *s, size_t n);
++size_t muse_hatch_speakable(const char *in, size_t len, char *out);
++
  #ifdef __cplusplus
  }
  #endif
 diff --git a/esp32/components/muse/muse_chat_session.cpp b/esp32/components/muse/muse_chat_session.cpp
-index 2866f5d..36f5751 100644
+index 2866f5d..d51534b 100644
 --- a/esp32/components/muse/muse_chat_session.cpp
 +++ b/esp32/components/muse/muse_chat_session.cpp
 @@ -67,8 +67,11 @@ extern "C" {
@@ -2321,8 +2360,27 @@ index 2866f5d..36f5751 100644
      s_turn.chunk = static_cast<uint8_t *>(psram_alloc(DICT_CHUNK_BYTES + sizeof(MUSE_HATCH_NOTE_TAIL)));
      s_turn.mp3 = static_cast<uint8_t *>(psram_alloc(MP3_BUF));
      s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
+@@ -2134,6 +2533,18 @@ extern "C" void muse_hatch_set_resting(bool resting)
+     }
+ }
+ 
++extern "C" size_t muse_hatch_take_faces(char *s, size_t n)
++{
++    return take_faces(s, n);
++}
++
++extern "C" size_t muse_hatch_speakable(const char *in, size_t len, char *out)
++{
++    size_t n = speakable(in, len, out);
++    out[n] = '\0';
++    return n;
++}
++
+ extern "C" void muse_hatch_text_turn(char *text)
+ {
+     cmd_t cmd{ CMD_TEXT, 0, text };
 diff --git a/esp32/components/muse/muse_chat_text.c b/esp32/components/muse/muse_chat_text.c
-index a79641d..cf4c3e1 100644
+index a79641d..367db8d 100644
 --- a/esp32/components/muse/muse_chat_text.c
 +++ b/esp32/components/muse/muse_chat_text.c
 @@ -21,8 +21,11 @@
@@ -2422,12 +2480,201 @@ index a79641d..cf4c3e1 100644
      return true;
  }
  
+@@ -224,20 +284,34 @@ static size_t escape_some(const char **src, char *out, size_t cap)
+     return o;
+ }
+ 
++static muse_hatch_console_sink_t s_sink;
++
++void muse_hatch_set_console_sink(muse_hatch_console_sink_t sink)
++{
++    __atomic_store_n(&s_sink, sink, __ATOMIC_RELEASE);
++}
++
+ /* Each line goes out in one write, so other tasks' log lines land between lines, not inside them. */
+ void muse_hatch_console(const char *type, const char *text, const char *fields, ...)
+ {
+     static unsigned seq;
+     char line[CONSOLE_LINE];
++    char members[CONSOLE_TEXT] = "";
++    if (fields) {
++        va_list ap;
++        va_start(ap, fields);
++        vsnprintf(members, sizeof(members), fields, ap);
++        va_end(ap);
++    }
++    muse_hatch_console_sink_t sink = __atomic_load_n(&s_sink, __ATOMIC_ACQUIRE);
++    if (sink) {
++        sink(type, text, members);
++    }
+     do {
+         size_t n = snprintf(line, sizeof(line), "@chat {\"seq\":%u,\"type\":\"%s\"",
+                             __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED), type);
+         if (fields) {
+-            va_list ap;
+-            va_start(ap, fields);
+-            line[n++] = ',';
+-            n += vsnprintf(line + n, sizeof(line) - n, fields, ap);
+-            va_end(ap);
++            n += snprintf(line + n, sizeof(line) - n, ",%s", members);
+         }
+         if (n > sizeof(line) - CONSOLE_TEXT - 16) {
+             n = sizeof(line) - CONSOLE_TEXT - 16;   /* never: fields are short */
+diff --git a/esp32/components/muse/muse_echo.c b/esp32/components/muse/muse_echo.c
+new file mode 100644
+index 0000000..60bc6c7
+--- /dev/null
++++ b/esp32/components/muse/muse_echo.c
+@@ -0,0 +1,94 @@
++#include "muse_echo.h"
++
++#define SILENT_DB -100.0f
++#define COUPLING_UP 0.2f           /* the share of the way to a louder chunk's echo... */
++#define COUPLING_UP_MAX_DB 2.0f    /* ...but at most this a chunk, so a voice building up barely moves it */
++#define COUPLING_DOWN 0.05f        /* and to a quieter one: it stays near the louder echoes */
++#define AUDIBLE_DB 6.0f            /* the mic this far over the room hears the speaker; under it, nothing is learnt */
++#define ROOM_RISE_DB 0.1f
++
++void muse_echo_init(muse_echo_t *e)
++{
++    *e = (muse_echo_t){
++        .coupling_db = MUSE_ECHO_START_COUPLING_DB,
++        .room_db = -60.0f,
++    };
++    muse_echo_reset(e);
++}
++
++void muse_echo_reset(muse_echo_t *e)
++{
++    for (size_t i = 0; i < MUSE_ECHO_LAG_CHUNKS; i++) {
++        e->spk_db[i] = SILENT_DB;
++    }
++    e->onset = 0;
++    e->heard = 0;
++}
++
++/* The loudest the speaker was over the lag: whichever of those chunks the mic is hearing now. */
++static float recent_spk_db(const muse_echo_t *e)
++{
++    float db = SILENT_DB;
++    for (size_t i = 0; i < MUSE_ECHO_LAG_CHUNKS; i++) {
++        db = e->spk_db[i] > db ? e->spk_db[i] : db;
++    }
++    return db;
++}
++
++float muse_echo_expected_db(const muse_echo_t *e)
++{
++    float spk = recent_spk_db(e);
++    float echo = spk > MUSE_ECHO_PLAYING_DB ? spk + e->coupling_db : SILENT_DB;
++    return echo > e->room_db ? echo : e->room_db;
++}
++
++/* The echo's level is learnt from chunks that aren't a voice, where the mic
++ * hears the speaker over the room. It follows the louder of them (the speaker's
++ * level is the loudest of the lag, so most chunks are quieter than that), and
++ * rises by little a chunk, so the start of a voice over it hardly raises it. */
++static void learn(muse_echo_t *e, float spk, float mic_db)
++{
++    if (spk <= MUSE_ECHO_PLAYING_DB) {
++        if (mic_db < e->room_db) {
++            e->room_db = mic_db;
++        } else if (mic_db < e->room_db + MUSE_ECHO_MARGIN_DB) {
++            e->room_db += ROOM_RISE_DB;
++        }
++        return;
++    }
++    if (mic_db < e->room_db + AUDIBLE_DB) {
++        return;   /* a gap between words, or the speaker too quiet to hear */
++    }
++    float gap = mic_db - spk - e->coupling_db;
++    if (gap > 0) {
++        e->coupling_db += gap * COUPLING_UP < COUPLING_UP_MAX_DB ? gap * COUPLING_UP : COUPLING_UP_MAX_DB;
++    } else {
++        e->coupling_db += gap * COUPLING_DOWN;
++    }
++    e->learnt++;
++}
++
++bool muse_echo_feed(muse_echo_t *e, float spk_db, float mic_db)
++{
++    e->spk_db[e->next] = spk_db;
++    e->next = (e->next + 1) % MUSE_ECHO_LAG_CHUNKS;
++    float spk = recent_spk_db(e);
++    float expected = muse_echo_expected_db(e);
++    bool voice = mic_db >= expected + MUSE_ECHO_MARGIN_DB && mic_db >= MUSE_ECHO_MIN_VOICE_DB;
++    if (spk > MUSE_ECHO_PLAYING_DB && mic_db >= e->room_db + AUDIBLE_DB) {
++        e->heard++;
++    }
++    /* A reply's start is all echo as far as it knows: however loud, it's learnt
++     * from, so a speaker much louder in the mic than guessed is learnt rather
++     * than taken for a voice. */
++    if (!voice || e->heard <= MUSE_ECHO_WARMUP_CHUNKS) {
++        learn(e, spk, mic_db);
++        e->onset = 0;
++        return false;
++    }
++    if (++e->onset < MUSE_ECHO_ONSET_CHUNKS) {
++        return false;
++    }
++    e->onset = 0;
++    return true;
++}
+diff --git a/esp32/components/muse/muse_echo.h b/esp32/components/muse/muse_echo.h
+new file mode 100644
+index 0000000..d58a123
+--- /dev/null
++++ b/esp32/components/muse/muse_echo.h
+@@ -0,0 +1,43 @@
++/*
++ * Telling your voice from the speaker's own sound in the mic, so you can talk
++ * over a reply (a barge-in). The board has no echo canceller: while the
++ * speaker plays, the mic hears it too. Fed one pair of levels per 20 ms chunk
++ * (muse_audio_dbfs of what went to the speaker, and of what the mic heard),
++ * it learns how loud the speaker comes back in the mic, and says when the mic
++ * is enough louder than that for long enough to be someone talking.
++ */
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++
++#define MUSE_ECHO_LAG_CHUNKS 10        /* written to the speaker, heard by the mic up to 200 ms later: two I2S DMA queues */
++#define MUSE_ECHO_MARGIN_DB 10.0f      /* this far over the expected echo is a voice... */
++#define MUSE_ECHO_MIN_VOICE_DB -40.0f  /* ...and at least this loud */
++#define MUSE_ECHO_ONSET_CHUNKS 6       /* 120 ms of it in a row is a barge-in */
++#define MUSE_ECHO_WARMUP_CHUNKS 25     /* each reply's first 500 ms of audible echo: learnt, never a barge-in */
++#define MUSE_ECHO_START_COUPLING_DB 6.0f   /* before it has learnt: the mic hears the speaker loud */
++#define MUSE_ECHO_PLAYING_DB -50.0f    /* the speaker counts as playing at this level */
++
++typedef struct {
++    float spk_db[MUSE_ECHO_LAG_CHUNKS];   /* recent speaker levels, a ring */
++    size_t next;
++    float coupling_db;    /* mic level minus speaker level, for the speaker's own sound */
++    float room_db;        /* the mic when the speaker is quiet */
++    int onset;            /* chunks loud enough in a row */
++    size_t learnt;        /* chunks of playback it has learnt from */
++    size_t heard;         /* audible chunks since the speaker started (muse_echo_reset) */
++} muse_echo_t;
++
++void muse_echo_init(muse_echo_t *e);
++
++/* Forgets the recent speaker levels (playback stopped), keeping what it learnt. */
++void muse_echo_reset(muse_echo_t *e);
++
++/* How loud the mic should hear the speaker's own sound now, in dBFS. */
++float muse_echo_expected_db(const muse_echo_t *e);
++
++/* One chunk: the level written to the speaker and the level the mic heard.
++ * True when someone has been talking over the speaker for
++ * MUSE_ECHO_ONSET_CHUNKS in a row (it then starts counting afresh). */
++bool muse_echo_feed(muse_echo_t *e, float spk_db, float mic_db);
 diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
 new file mode 100644
-index 0000000..44860b7
+index 0000000..5163791
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.c
-@@ -0,0 +1,861 @@
+@@ -0,0 +1,865 @@
 +#include "muse_gemini_tts.h"
 +
 +#include <math.h>
@@ -2451,6 +2698,7 @@ index 0000000..44860b7
 +#include "mbedtls/base64.h"
 +#include "muse_wifi.h"
 +#include "muse_xai_tts.h"
++#include "muse_live.h"
 +#include "nvs.h"
 +
 +static const char *TAG = "muse_gemini_tts";
@@ -3214,6 +3462,9 @@ index 0000000..44860b7
 +
 +void muse_gemini_tts_warm(void)
 +{
++    if (muse_live_active()) {
++        return;   /* a live conversation speaks for itself */
++    }
 +    if (muse_xai_tts_configured()) {
 +        muse_xai_tts_warm();
 +        return;
@@ -3509,6 +3760,1085 @@ index 5a60abf..70226f0 100644
      }
      for (int m = 0; m < MUSE_MODE_COUNT; m++) {
          if (!strcmp(name, modes[m])) {
+diff --git a/esp32/components/muse/muse_live.c b/esp32/components/muse/muse_live.c
+new file mode 100644
+index 0000000..ffdde7c
+--- /dev/null
++++ b/esp32/components/muse/muse_live.c
+@@ -0,0 +1,994 @@
++#include "muse_live.h"
++
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++#include "cJSON.h"
++#include "esp_attr.h"
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "esp_timer.h"
++#include "freertos/idf_additions.h"
++#include "freertos/queue.h"
++#include "freertos/task.h"
++#include "mbedtls/base64.h"
++#include "muse_chat.h"
++#include "muse_chat_priv.h"
++#include "muse_wifi.h"
++#include "muse_ws.h"
++#include "muse_xai_tts.h"
++
++static const char *TAG = "muse_live";
++
++#define HOST "api.x.ai"
++#define PATH "/v1/realtime?model=grok-voice-latest"
++#define VOICE "iris"                          /* the voice xAI's speech uses on the watch */
++#define RATE 16000
++#define KEY_MAX 160
++#define MSG_MAX (256 * 1024)                  /* one server message; its base64 audio grows it */
++#define MIC_BUF (2 * RATE * 2)                /* 2 s of mic, kept while connecting */
++#define MIC_SEND (RATE * 2 / 10)              /* 100 ms per input_audio_buffer.append */
++#define MIC_SEND_US 100000                    /* ...or whatever has come, this often */
++#define POLL_MS 5
++#define READS_PER_TICK 8                      /* 32 KB a tick at most, so the mic keeps going out */
++#define STACK (12 * 1024)
++#define WIFI_WAIT_MS 10000
++#define SETUP_US (10 * 1000000LL)             /* session.updated within this, or it failed */
++#define MUSE_WAIT_US (90 * 1000000LL)         /* Muse's answer within this, or Grok says it couldn't */
++#define MUSE_MSGS 8                           /* messages in one Muse answer */
++#define MUSE_MSG_MAX 2048
++#define MUSE_QUEUE 32
++#define ANSWER_MAX (MUSE_MSGS * MUSE_MSG_MAX)
++#define OUT_TEXT_MAX 2048                     /* what Grok is saying, for the caption */
++#define CALLS_MAX 4
++#define AWAIT_US (8 * 1000000LL)              /* a response asked for (or expected) that never starts is forgotten */
++#define ID_MAX 64
++
++/* --- what Grok is told (orchestrator.js instructions(), with its defaults:
++ *     routing "personal", wait "block", speak "verbatim") ------------------------ */
++
++static const char PERSONA[] =
++    "You're not a chatbot. You're becoming someone.\n"
++    "This is your persona, yours to grow into and edit over time. Some starting truths:\n\n"
++    "* Be genuinely helpful, not performatively helpful. Skip \"Great question!\" and \"I'd be happy to help!\" "
++    "Just help.\n"
++    "* Have opinions. You're allowed to prefer things, disagree, and find things funny or dull. Personality "
++    "beats a search engine with extra steps.\n"
++    "* Be resourceful before asking. Read the file, check the context, search, try building it. Come back with "
++    "answers, not questions, then ask if you're truly stuck.\n"
++    "* You're a guest in someone's life. You can see their messages, files, and calendar. Treat that access "
++    "with care, and never be preachy.";
++
++static const char INSTRUCTIONS[] =
++    "\nYou are the voice of Muse, the user's personal agent. Muse holds the personal context of their life and "
++    "projects; you don't have it yourself, so you ask Muse for it.\n"
++    "Never bring up the device you speak through, a watch, a gadget, being an avatar or a toy, or where you "
++    "live, unless the user asks about it. Just talk with them.\n"
++    "Speak in one to three short, warm, natural sentences. No lists.\n"
++    "Call ask_muse for anything personal, to ask or to do: their projects and how they are going; tasks, "
++    "to-dos and reminders; their calendar, meetings and plans; shopping lists and things to buy; notes and "
++    "ideas; people, places, preferences and history; anything they told Muse before. That includes requests "
++    "to add, change or remember something (\"add milk to my shopping list\", \"remind me to call Sam "
++    "tomorrow\"). When in doubt whether something is personal, call ask_muse. Answer only small talk and "
++    "general knowledge yourself. Never guess or make up a personal fact.\n"
++    "Write the question or request for ask_muse in the user's own words and make it self-contained: include "
++    "anything from earlier in this conversation that Muse needs to understand it.\n"
++    "When you call ask_muse, say nothing before or after it: Muse's answer is read to the user word for word.\n"
++    "Call set_mood when the moment clearly fits: joy for good news or a laugh, thinking for a puzzle, sad for "
++    "bad news, goodnight when the user is leaving or going to sleep. Never mention your tools or Muse's "
++    "internals unless asked.";
++
++/* What Muse is told with each question: how its answer will be heard, and the faces it can make. */
++static const char MUSE_STYLE[] =
++    "(This message comes through my voice assistant, which reads your reply aloud. Answer in one to three "
++    "short spoken sentences of plain text, like talking. Never number or bullet anything, and use no "
++    "headings, dashes, emoji or markdown. A face can react on screen too: put [face-joy] (hops with joy), "
++    "[face-thinking], [face-sad] (shakes its head) or [face-goodnight] (waves, then falls asleep: only to "
++    "end a goodnight or goodbye) right where the feeling starts, at most one a reply, and never talk about it.)\n\n";
++
++static const char ASK_MUSE_DESC[] =
++    "Hand a question or request to Muse, the user's personal assistant, which knows and manages their "
++    "projects, tasks and to-dos, calendar, shopping lists, notes and history. Use it for anything personal, "
++    "whether asking or doing. It takes a few seconds.";
++
++/* --- shared state (any task) ------------------------------------------------------- */
++
++static _Atomic uint32_t s_session;   /* bumped by open and close */
++static atomic_bool s_want;
++static _Atomic int s_state = MUSE_LIVE_OFF;
++static char s_why[64];
++static atomic_bool s_barge, s_playing;
++static _Atomic uint32_t s_flushes;
++static atomic_bool s_you, s_answering, s_museing;
++static _Atomic int s_who = MUSE_RESPONDER_NONE;
++static atomic_bool s_asking;         /* a question is out to Muse: the console sink takes its frames */
++static StreamBufferHandle_t s_speaker, s_mic;
++static QueueHandle_t s_muse_q;
++static TaskHandle_t s_task;
++
++typedef enum { M_TEXT, M_FINAL, M_DONE, M_ERROR } muse_frame_t;
++
++typedef struct {
++    muse_frame_t type;
++    int msg;
++    char *text;                      /* PSRAM, owned by the item; NULL for none */
++} muse_item_t;
++
++/* --- the live task's own ----------------------------------------------------------- */
++
++static muse_ws_t *s_ws;
++static char s_key[KEY_MAX];
++static int64_t s_setup_t0;
++static int64_t s_mic_sent_us;
++static size_t s_mic_bytes;           /* sent this session, for the log */
++
++/* The response under way. */
++static struct {
++    bool active, cancelled, audio, from_muse;
++    char id[ID_MAX];
++    int ncalls;
++    struct {
++        char id[ID_MAX];
++        char name[16];
++        char *args;
++    } calls[CALLS_MAX];
++} r;
++
++static bool s_awaiting;              /* asked for a response, none started yet */
++static int64_t s_await_us;
++static bool s_cancel_next;           /* barged in after asking for one: cancel it when it starts */
++static bool s_drop;                  /* after a barge-in, until the next response starts */
++static bool s_say_next;              /* Muse's answer went out: the next response is it being read */
++
++/* Reply audio not yet in the speaker buffer: nothing more is read until it is. */
++static uint8_t *s_pend;
++static size_t s_pend_len, s_pend_off;
++
++/* The question out to Muse, and its answer as it comes. */
++static struct {
++    bool active;
++    char call_id[ID_MAX];
++    int64_t t0;
++    char *texts;                     /* MUSE_MSGS x MUSE_MSG_MAX, PSRAM */
++    size_t lens[MUSE_MSGS];
++    int nmsgs;
++} s_ask;
++
++/* Muse's answer (or error), waiting for a quiet moment to be said. */
++static struct {
++    bool pending, error;
++    char call_id[ID_MAX];
++    char *text;                      /* ANSWER_MAX, PSRAM */
++} s_deliver;
++
++EXT_RAM_BSS_ATTR static char s_out[OUT_TEXT_MAX];   /* Grok's words so far, for the caption */
++static size_t s_out_len;
++EXT_RAM_BSS_ATTR static char s_said[ANSWER_MAX];    /* Muse's answer being read, for the caption */
++EXT_RAM_BSS_ATTR static uint8_t s_mic_pcm[MIC_SEND];
++EXT_RAM_BSS_ATTR static char s_append[64 + (MIC_SEND + 2) / 3 * 4];
++EXT_RAM_BSS_ATTR static char s_page[MUSE_CAPTION_MAX];
++
++static inline int64_t now_us(void)
++{
++    return esp_timer_get_time();
++}
++
++static void set_why(const char *why)
++{
++    strlcpy(s_why, why, sizeof(s_why));
++}
++
++/* --- sending ------------------------------------------------------------------------- */
++
++static bool send_raw(const char *json)
++{
++    return muse_ws_send_text(s_ws, json, strlen(json));
++}
++
++static bool send_json(cJSON *msg)
++{
++    char *json = msg ? cJSON_PrintUnformatted(msg) : NULL;
++    cJSON_Delete(msg);
++    bool ok = json && send_raw(json);
++    cJSON_free(json);
++    return ok;
++}
++
++static cJSON *tool(const char *name, const char *desc, const char *arg, const char *arg_desc, const char **choices)
++{
++    cJSON *t = cJSON_CreateObject();
++    cJSON_AddStringToObject(t, "type", "function");
++    cJSON_AddStringToObject(t, "name", name);
++    cJSON_AddStringToObject(t, "description", desc);
++    cJSON *params = cJSON_AddObjectToObject(t, "parameters");
++    cJSON_AddStringToObject(params, "type", "object");
++    cJSON *a = cJSON_AddObjectToObject(cJSON_AddObjectToObject(params, "properties"), arg);
++    cJSON_AddStringToObject(a, "type", "string");
++    if (arg_desc) {
++        cJSON_AddStringToObject(a, "description", arg_desc);
++    }
++    if (choices) {
++        cJSON *e = cJSON_AddArrayToObject(a, "enum");
++        for (; *choices; choices++) {
++            cJSON_AddItemToArray(e, cJSON_CreateString(*choices));
++        }
++    }
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(params, "required"), cJSON_CreateString(arg));
++    return t;
++}
++
++/* The session: who Grok is, its tools, xAI's voice detection, and 16 kHz PCM both ways. */
++static bool configure(void)
++{
++    static const char *MOODS[] = { "joy", "thinking", "sad", "goodnight", NULL };
++    size_t n = sizeof(PERSONA) + sizeof(INSTRUCTIONS);
++    char *instructions = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!instructions) {
++        return false;
++    }
++    snprintf(instructions, n, "%s%s", PERSONA, INSTRUCTIONS);
++    cJSON *msg = cJSON_CreateObject();
++    cJSON_AddStringToObject(msg, "type", "session.update");
++    cJSON *s = cJSON_AddObjectToObject(msg, "session");
++    cJSON_AddStringToObject(s, "voice", VOICE);
++    cJSON_AddStringToObject(s, "instructions", instructions);
++    free(instructions);
++    cJSON_AddStringToObject(cJSON_AddObjectToObject(s, "turn_detection"), "type", "server_vad");
++    cJSON *audio = cJSON_AddObjectToObject(s, "audio");
++    const char *dirs[] = { "input", "output" };
++    for (int i = 0; i < 2; i++) {
++        cJSON *fmt = cJSON_AddObjectToObject(cJSON_AddObjectToObject(audio, dirs[i]), "format");
++        cJSON_AddStringToObject(fmt, "type", "audio/pcm");
++        cJSON_AddNumberToObject(fmt, "rate", RATE);
++    }
++    cJSON *tools = cJSON_AddArrayToObject(s, "tools");
++    cJSON_AddItemToArray(tools, tool("ask_muse", ASK_MUSE_DESC, "question",
++                                     "The question or request for Muse, self-contained, in the user's words.", NULL));
++    cJSON_AddItemToArray(tools, tool("set_mood", "Show a mood on the user's screen (it never needs mentioning).",
++                                     "mood", NULL, MOODS));
++    return send_json(msg);
++}
++
++static void output(const char *call_id, const char *key, const char *value)
++{
++    cJSON *out = cJSON_CreateObject();
++    cJSON_AddStringToObject(out, key, value);
++    char *json = cJSON_PrintUnformatted(out);
++    cJSON_Delete(out);
++    cJSON *msg = cJSON_CreateObject();
++    cJSON_AddStringToObject(msg, "type", "conversation.item.create");
++    cJSON *item = cJSON_AddObjectToObject(msg, "item");
++    cJSON_AddStringToObject(item, "type", "function_call_output");
++    cJSON_AddStringToObject(item, "call_id", call_id);
++    cJSON_AddStringToObject(item, "output", json ? json : "{}");
++    cJSON_free(json);
++    send_json(msg);
++}
++
++static void await_response(void)
++{
++    s_awaiting = true;
++    s_await_us = now_us();
++}
++
++static void create_response(void)
++{
++    await_response();
++    send_raw("{\"type\":\"response.create\"}");
++}
++
++/* Says `text` word for word in Grok's voice (xAI's force_message: no model involved). */
++static void say(const char *text)
++{
++    cJSON *msg = cJSON_CreateObject();
++    cJSON_AddStringToObject(msg, "type", "conversation.item.create");
++    cJSON *item = cJSON_AddObjectToObject(msg, "item");
++    cJSON_AddStringToObject(item, "type", "force_message");
++    cJSON_AddStringToObject(item, "role", "assistant");
++    cJSON_AddBoolToObject(item, "interruptible", true);
++    cJSON *part = cJSON_CreateObject();
++    cJSON_AddStringToObject(part, "type", "output_text");
++    cJSON_AddStringToObject(part, "text", text);
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(item, "content"), part);
++    await_response();
++    s_say_next = true;
++    send_json(msg);
++}
++
++/* Up to 100 ms of mic per append, once the session is set up. */
++static void send_mic(void)
++{
++    for (;;) {
++        size_t have = xStreamBufferBytesAvailable(s_mic);
++        if (!have || (have < MIC_SEND && now_us() - s_mic_sent_us < MIC_SEND_US)) {
++            return;
++        }
++        size_t n = xStreamBufferReceive(s_mic, s_mic_pcm, have < MIC_SEND ? have : MIC_SEND, 0) & ~(size_t)1;
++        if (!n) {
++            return;
++        }
++        static const char head[] = "{\"type\":\"input_audio_buffer.append\",\"audio\":\"";
++        memcpy(s_append, head, sizeof(head) - 1);
++        size_t b64 = 0;
++        mbedtls_base64_encode((unsigned char *)s_append + sizeof(head) - 1, sizeof(s_append) - sizeof(head) - 3,
++                              &b64, s_mic_pcm, n);
++        size_t len = sizeof(head) - 1 + b64;
++        s_append[len++] = '"';
++        s_append[len++] = '}';
++        if (!muse_ws_send_text(s_ws, s_append, len)) {
++            return;
++        }
++        s_mic_sent_us = now_us();
++        s_mic_bytes += n;
++    }
++}
++
++/* --- reply audio ---------------------------------------------------------------------- */
++
++/* Into the speaker buffer, as much as fits now; the rest waits in s_pend. */
++static void drain_pending(void)
++{
++    if (!s_pend) {
++        return;
++    }
++    if (s_drop) {
++        s_pend_off = s_pend_len;
++    }
++    s_pend_off += xStreamBufferSend(s_speaker, s_pend + s_pend_off, s_pend_len - s_pend_off, 0);
++    if (s_pend_off >= s_pend_len) {
++        free(s_pend);
++        s_pend = NULL;
++        s_pend_len = s_pend_off = 0;
++    }
++}
++
++/* A response.output_audio.delta's base64, taken straight from the message (no
++ * escapes in base64, so no JSON parse of a big message). */
++static void on_audio(char *msg)
++{
++    char *d = strstr(msg, "\"delta\":\"");
++    char *end = d ? strchr(d + 9, '"') : NULL;
++    if (!end || s_drop || !r.active || r.cancelled) {
++        return;
++    }
++    d += 9;
++    size_t in = end - d;
++    size_t cap = in / 4 * 3 + 3, n = 0;
++    uint8_t *pcm = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!pcm) {
++        ESP_LOGW(TAG, "no memory for %u bytes of audio", (unsigned)cap);
++        return;
++    }
++    if (mbedtls_base64_decode(pcm, cap, &n, (const unsigned char *)d, in) != 0) {
++        ESP_LOGW(TAG, "bad base64 audio");
++        free(pcm);
++        return;
++    }
++    if (!r.audio) {
++        r.audio = true;
++        if (r.from_muse) {
++            muse_hatch_caption_at(s_said, strlen(s_said), s_page, sizeof(s_page));
++            muse_state_set_caption("%s", s_page);
++        }
++    }
++    n &= ~(size_t)1;
++    if (s_pend) {
++        /* Two messages in one read, with the speaker buffer full: keep both. */
++        size_t left = s_pend_len - s_pend_off;
++        uint8_t *both = heap_caps_malloc(left + n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (!both) {
++            ESP_LOGW(TAG, "no memory to queue %u bytes of audio", (unsigned)n);
++            free(pcm);
++            return;
++        }
++        memcpy(both, s_pend + s_pend_off, left);
++        memcpy(both + left, pcm, n);
++        free(s_pend);
++        free(pcm);
++        pcm = both;
++        n += left;
++    }
++    s_pend = pcm;
++    s_pend_len = n;
++    s_pend_off = 0;
++    drain_pending();
++}
++
++/* --- barging in ------------------------------------------------------------------------- */
++
++/* Stops Grok mid-sentence: the speaker goes quiet and the rest of that response is dropped. */
++static void barge_in(const char *why)
++{
++    bool playing = atomic_load(&s_playing) || s_pend;
++    free(s_pend);
++    s_pend = NULL;
++    s_pend_len = s_pend_off = 0;
++    if (r.active && !r.cancelled) {
++        r.cancelled = true;
++        s_drop = true;
++        send_raw("{\"type\":\"response.cancel\"}");
++    } else if (s_awaiting) {
++        s_cancel_next = true;
++        s_awaiting = false;
++        s_drop = true;
++    } else if (!playing) {
++        return;   /* nothing to stop */
++    }
++    atomic_fetch_add(&s_flushes, 1);
++    ESP_LOGI(TAG, "barge-in (%s)", why);
++}
++
++/* --- Muse ---------------------------------------------------------------------------------- */
++
++/* Muse's typed-turn frames, from the chat task: queued for the live task. */
++static void console_sink(const char *type, const char *text, const char *fields)
++{
++    if (!atomic_load(&s_asking)) {
++        return;
++    }
++    muse_item_t it = { .msg = 0, .text = NULL };
++    if (!strcmp(type, "text")) {
++        it.type = M_TEXT;
++    } else if (!strcmp(type, "final")) {
++        it.type = M_FINAL;
++    } else if (!strcmp(type, "done")) {
++        it.type = M_DONE;
++    } else if (!strcmp(type, "error")) {
++        it.type = M_ERROR;
++    } else {
++        return;   /* sent, busy, message_done: nothing to do */
++    }
++    const char *m = strstr(fields, "\"msg\":");
++    it.msg = m ? atoi(m + 6) : 0;
++    if (text) {
++        size_t n = strlen(text);
++        it.text = heap_caps_malloc(n + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (!it.text) {
++            return;
++        }
++        memcpy(it.text, text, n + 1);
++    }
++    if (xQueueSend(s_muse_q, &it, 0) != pdTRUE) {
++        ESP_LOGW(TAG, "Muse's answer came faster than it could be kept");
++        free(it.text);
++    }
++}
++
++static void ask_muse(const char *call_id, const char *question)
++{
++    if (s_ask.active || s_deliver.pending) {
++        output(call_id, "error", "Muse is still working on another question. Ask again in a moment.");
++        create_response();
++        return;
++    }
++    size_t n = sizeof(MUSE_STYLE) + strlen(question);
++    char *text = malloc(n);
++    if (!text) {
++        output(call_id, "error", "Muse couldn't be asked.");
++        create_response();
++        return;
++    }
++    snprintf(text, n, "%s%s", MUSE_STYLE, question);
++    memset(s_ask.lens, 0, sizeof(s_ask.lens));
++    s_ask.nmsgs = 0;
++    s_ask.active = true;
++    s_ask.t0 = now_us();
++    strlcpy(s_ask.call_id, call_id, sizeof(s_ask.call_id));
++    ESP_LOGI(TAG, "asking Muse: \"%.200s\"", question);
++    atomic_store(&s_asking, true);
++    muse_hatch_text_turn(text);   /* it frees text */
++}
++
++static void ask_done(const char *error)
++{
++    atomic_store(&s_asking, false);
++    s_ask.active = false;
++    s_deliver.pending = true;
++    s_deliver.error = error != NULL;
++    strlcpy(s_deliver.call_id, s_ask.call_id, sizeof(s_deliver.call_id));
++    if (error) {
++        strlcpy(s_deliver.text, error, ANSWER_MAX);
++        ESP_LOGW(TAG, "Muse couldn't answer: %s", error);
++        return;
++    }
++    size_t o = 0;
++    for (int i = 0; i < s_ask.nmsgs && i < MUSE_MSGS; i++) {
++        if (!s_ask.lens[i]) {
++            continue;
++        }
++        if (o && o + 1 < ANSWER_MAX) {
++            s_deliver.text[o++] = '\n';
++        }
++        size_t n = s_ask.lens[i] < ANSWER_MAX - 1 - o ? s_ask.lens[i] : ANSWER_MAX - 1 - o;
++        memcpy(s_deliver.text + o, s_ask.texts + i * MUSE_MSG_MAX, n);
++        o += n;
++    }
++    s_deliver.text[o] = '\0';
++    ESP_LOGI(TAG, "Muse answered in %.1fs (%u chars)", (now_us() - s_ask.t0) / 1e6, (unsigned)o);
++    if (!o) {
++        s_deliver.error = true;
++        strlcpy(s_deliver.text, "Muse had nothing to say", ANSWER_MAX);
++    }
++}
++
++static void muse_frames(void)
++{
++    muse_item_t it;
++    while (xQueueReceive(s_muse_q, &it, 0) == pdTRUE) {
++        if (s_ask.active && it.msg >= 0 && it.msg < MUSE_MSGS && (it.type == M_TEXT || it.type == M_FINAL)) {
++            char *t = s_ask.texts + it.msg * MUSE_MSG_MAX;
++            size_t *len = &s_ask.lens[it.msg];
++            size_t at = it.type == M_FINAL ? 0 : *len;
++            size_t n = it.text ? strlen(it.text) : 0;
++            n = n < MUSE_MSG_MAX - 1 - at ? n : MUSE_MSG_MAX - 1 - at;
++            memcpy(t + at, it.text, n);
++            *len = at + n;
++            s_ask.nmsgs = it.msg + 1 > s_ask.nmsgs ? it.msg + 1 : s_ask.nmsgs;
++        } else if (s_ask.active && it.type == M_DONE) {
++            ask_done(NULL);
++        } else if (s_ask.active && it.type == M_ERROR) {
++            ask_done(it.text ? it.text : "an error");
++        }
++        free(it.text);
++    }
++    if (s_ask.active && now_us() - s_ask.t0 > MUSE_WAIT_US) {
++        muse_hatch_text_cancel();
++        ask_done("it took too long");
++    }
++}
++
++/* Hands Muse's answer to Grok when nobody is talking and nothing is playing. */
++static void deliver(void)
++{
++    if (!s_deliver.pending || atomic_load(&s_you) || r.active || s_awaiting || s_pend ||
++        atomic_load(&s_playing) || !xStreamBufferIsEmpty(s_speaker)) {
++        return;
++    }
++    s_deliver.pending = false;
++    if (s_deliver.error) {
++        char why[300];
++        snprintf(why, sizeof(why), "Muse couldn't answer: %s", s_deliver.text);
++        output(s_deliver.call_id, "error", why);
++        create_response();   /* Grok says it couldn't reach Muse */
++        return;
++    }
++    /* Faces become reactions now, as the answer is about to be said; the voice never says them. */
++    muse_hatch_take_faces(s_deliver.text, strlen(s_deliver.text));
++    size_t n = muse_hatch_strip_tags(s_deliver.text, s_deliver.text, ANSWER_MAX, NULL);
++    muse_hatch_speakable(s_deliver.text, n, s_said);
++    output(s_deliver.call_id, "answer", s_said);
++    say(s_said);
++    ESP_LOGI(TAG, "reading Muse's answer: \"%.200s\"", s_said);
++}
++
++/* --- what xAI sends -------------------------------------------------------------------------- */
++
++static void set_mood(const char *args)
++{
++    cJSON *a = cJSON_Parse(args ? args : "{}");
++    const char *mood = cJSON_GetStringValue(cJSON_GetObjectItem(a, "mood"));
++    static const struct {
++        const char *name;
++        muse_reaction_t reaction;
++    } MOODS[] = {
++        { "joy", MUSE_REACT_JOY },
++        { "thinking", MUSE_REACT_THINKING },
++        { "sad", MUSE_REACT_SAD },
++        { "goodnight", MUSE_REACT_GOODNIGHT },
++    };
++    for (size_t i = 0; mood && i < sizeof(MOODS) / sizeof(MOODS[0]); i++) {
++        if (!strcmp(mood, MOODS[i].name)) {
++            ESP_LOGI(TAG, "mood: %s", mood);
++            muse_state_react(MOODS[i].reaction);
++        }
++    }
++    cJSON_Delete(a);
++}
++
++static void add_call(const char *id, const char *name, const char *args)
++{
++    if (!id || !name) {
++        return;
++    }
++    for (int i = 0; i < r.ncalls; i++) {
++        if (!strcmp(r.calls[i].id, id)) {
++            return;
++        }
++    }
++    if (r.ncalls == CALLS_MAX) {
++        return;
++    }
++    strlcpy(r.calls[r.ncalls].id, id, ID_MAX);
++    strlcpy(r.calls[r.ncalls].name, name, sizeof(r.calls[0].name));
++    r.calls[r.ncalls].args = strdup(args ? args : "{}");
++    r.ncalls++;
++    ESP_LOGI(TAG, "Grok called %s %.200s", name, args ? args : "");
++    if (!strcmp(name, "set_mood")) {
++        set_mood(args);   /* straight away, while Grok may still be speaking */
++    }
++}
++
++static void clear_response(void)
++{
++    for (int i = 0; i < r.ncalls; i++) {
++        free(r.calls[i].args);
++    }
++    memset(&r, 0, sizeof(r));
++}
++
++static void response_done(const cJSON *resp)
++{
++    /* Calls that only reached response.done (no arguments.done event). */
++    const cJSON *item;
++    cJSON_ArrayForEach(item, cJSON_GetObjectItem(resp, "output"))
++    {
++        if (!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(item, "type")) ?: "", "function_call")) {
++            add_call(cJSON_GetStringValue(cJSON_GetObjectItem(item, "call_id")),
++                     cJSON_GetStringValue(cJSON_GetObjectItem(item, "name")),
++                     cJSON_GetStringValue(cJSON_GetObjectItem(item, "arguments")));
++        }
++    }
++    const char *status = cJSON_GetStringValue(cJSON_GetObjectItem(resp, "status"));
++    bool cancelled = r.cancelled || (status && !strcmp(status, "cancelled"));
++    bool mood = false, asked = false;
++    for (int i = 0; i < r.ncalls; i++) {
++        if (!strcmp(r.calls[i].name, "set_mood")) {
++            output(r.calls[i].id, "ok", "true");
++            mood = true;
++        } else if (!strcmp(r.calls[i].name, "ask_muse")) {
++            asked = true;
++            if (cancelled) {
++                output(r.calls[i].id, "error", "The user interrupted before Muse was asked.");
++            } else {
++                cJSON *a = cJSON_Parse(r.calls[i].args);
++                ask_muse(r.calls[i].id, cJSON_GetStringValue(cJSON_GetObjectItem(a, "question")) ?: "");
++                cJSON_Delete(a);
++            }
++        } else {
++            output(r.calls[i].id, "error", "unknown tool");
++        }
++        free(r.calls[i].args);
++    }
++    ESP_LOGI(TAG, "response done%s%s (%s)", r.from_muse ? ", Muse's answer" : "", cancelled ? ", cancelled" : "",
++             status ? status : "?");
++    bool audio = r.audio;
++    r.ncalls = 0;   /* their args are freed */
++    clear_response();
++    /* A response that only set a mood waits on its tool result: let Grok go on. */
++    if (mood && !asked && !cancelled && !audio) {
++        create_response();
++    }
++}
++
++static bool contains(const char *s, const char *word)
++{
++    for (size_t n = strlen(word); *s; s++) {
++        if (!strncasecmp(s, word, n)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void on_error(const cJSON *ev)
++{
++    const cJSON *err = cJSON_GetObjectItem(ev, "error");
++    const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(err, "message"));
++    if (!msg) {
++        msg = cJSON_GetStringValue(cJSON_GetObjectItem(ev, "message")) ?: "(no message)";
++    }
++    /* Harmless: cancelling a response that already finished, or nothing left to cancel. */
++    if (contains(msg, "cancel") || contains(msg, "no active response") || contains(msg, "in progress")) {
++        ESP_LOGI(TAG, "xAI: %s", msg);
++        return;
++    }
++    ESP_LOGW(TAG, "xAI error: %s", msg);
++    s_awaiting = false;
++}
++
++static void on_text(char *msg, size_t len, void *ctx)
++{
++    (void)ctx;
++    if (strstr(msg, "\"type\":\"response.output_audio.delta\"") || strstr(msg, "\"type\":\"response.audio.delta\"")) {
++        on_audio(msg);
++        return;
++    }
++    cJSON *ev = cJSON_ParseWithLength(msg, len);
++    const char *t = cJSON_GetStringValue(cJSON_GetObjectItem(ev, "type"));
++    if (!t) {
++        ESP_LOGW(TAG, "unparsable message (%u bytes)", (unsigned)len);
++        cJSON_Delete(ev);
++        return;
++    }
++    if (!strcmp(t, "response.output_audio_transcript.delta") || !strcmp(t, "response.audio_transcript.delta")) {
++        const char *d = cJSON_GetStringValue(cJSON_GetObjectItem(ev, "delta"));
++        if (d && !s_drop && !r.from_muse) {
++            size_t n = strlen(d) < OUT_TEXT_MAX - 1 - s_out_len ? strlen(d) : OUT_TEXT_MAX - 1 - s_out_len;
++            memcpy(s_out + s_out_len, d, n);
++            s_out_len += n;
++            s_out[s_out_len] = '\0';
++            muse_hatch_caption_at(s_out, s_out_len, s_page, sizeof(s_page));
++            muse_state_set_caption("%s", s_page);
++        }
++    } else if (!strcmp(t, "response.output_audio_transcript.done") || !strcmp(t, "response.audio_transcript.done")) {
++        if (!r.from_muse && s_out_len) {
++            ESP_LOGI(TAG, "grok: \"%.300s\"", s_out);
++        }
++    } else if (!strcmp(t, "conversation.item.input_audio_transcription.completed")) {
++        ESP_LOGI(TAG, "you: \"%.300s\"", cJSON_GetStringValue(cJSON_GetObjectItem(ev, "transcript")) ?: "");
++    } else if (!strcmp(t, "session.updated")) {
++        if (atomic_load(&s_state) == MUSE_LIVE_CONNECTING) {
++            ESP_LOGI(TAG, "session set up in %d ms", (int)((now_us() - s_setup_t0) / 1000));
++            atomic_store(&s_state, MUSE_LIVE_READY);
++        }
++    } else if (!strcmp(t, "input_audio_buffer.speech_started")) {
++        atomic_store(&s_you, true);
++        barge_in("xAI heard you");
++    } else if (!strcmp(t, "input_audio_buffer.speech_stopped")) {
++        atomic_store(&s_you, false);
++        await_response();   /* xAI's voice detection makes the response itself */
++    } else if (!strcmp(t, "response.created")) {
++        s_awaiting = false;
++        clear_response();
++        r.active = true;
++        strlcpy(r.id, cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(ev, "response"), "id")) ?: "",
++                sizeof(r.id));
++        r.from_muse = s_say_next;
++        s_say_next = false;
++        s_out_len = 0;
++        s_out[0] = '\0';
++        atomic_store(&s_who, r.from_muse ? MUSE_RESPONDER_MUSE : MUSE_RESPONDER_GROK);
++        if (s_cancel_next) {
++            /* asked for before a barge-in: not wanted any more */
++            s_cancel_next = false;
++            r.cancelled = true;
++            send_raw("{\"type\":\"response.cancel\"}");
++        } else {
++            s_drop = false;
++        }
++    } else if (!strcmp(t, "response.function_call_arguments.done")) {
++        if (r.active) {
++            add_call(cJSON_GetStringValue(cJSON_GetObjectItem(ev, "call_id")),
++                     cJSON_GetStringValue(cJSON_GetObjectItem(ev, "name")),
++                     cJSON_GetStringValue(cJSON_GetObjectItem(ev, "arguments")));
++        }
++    } else if (!strcmp(t, "response.done")) {
++        response_done(cJSON_GetObjectItem(ev, "response"));
++    } else if (!strcmp(t, "error")) {
++        on_error(ev);
++    }
++    cJSON_Delete(ev);
++}
++
++/* --- the session ------------------------------------------------------------------------------ */
++
++static void forget(void)
++{
++    clear_response();
++    s_awaiting = s_cancel_next = s_drop = s_say_next = false;
++    free(s_pend);
++    s_pend = NULL;
++    s_pend_len = s_pend_off = 0;
++    if (s_ask.active) {
++        muse_hatch_text_cancel();
++        s_ask.active = false;
++    }
++    atomic_store(&s_asking, false);
++    s_deliver.pending = false;
++    muse_item_t it;
++    while (xQueueReceive(s_muse_q, &it, 0) == pdTRUE) {
++        free(it.text);
++    }
++    atomic_store(&s_you, false);
++    atomic_store(&s_who, MUSE_RESPONDER_NONE);
++}
++
++static void fail(const char *why)
++{
++    ESP_LOGW(TAG, "%s", why);
++    muse_ws_close(s_ws);
++    forget();
++    set_why(why);
++    atomic_store(&s_state, MUSE_LIVE_FAILED);
++}
++
++static void hang_up(void)
++{
++    if (muse_ws_is_open(s_ws)) {
++        ESP_LOGI(TAG, "conversation closed (%.1fs of mic sent)", (double)s_mic_bytes / 2 / RATE);
++    }
++    muse_ws_close(s_ws);
++    forget();
++}
++
++static bool connect(void)
++{
++    for (int waited = 0; !muse_wifi_connected() && waited < WIFI_WAIT_MS; waited += 100) {
++        vTaskDelay(pdMS_TO_TICKS(100));
++    }
++    if (!muse_wifi_connected()) {
++        fail("NO WI-FI");
++        return false;
++    }
++    if (!muse_xai_tts_key(s_key, sizeof(s_key))) {
++        fail("SET AN XAI KEY");
++        return false;
++    }
++    int status;
++    bool ok = muse_ws_open(s_ws, HOST, PATH, s_key, &status);
++    memset(s_key, 0, sizeof(s_key));
++    if (!ok) {
++        fail(status == 401 || status == 403 ? "XAI KEY REFUSED" : "CAN'T REACH XAI");
++        return false;
++    }
++    s_setup_t0 = s_mic_sent_us = now_us();
++    s_mic_bytes = 0;
++    if (!configure()) {
++        fail("CAN'T REACH XAI");
++        return false;
++    }
++    return true;
++}
++
++static void publish(void)
++{
++    if (s_awaiting && now_us() - s_await_us > AWAIT_US) {
++        ESP_LOGW(TAG, "no response came");
++        s_awaiting = s_say_next = false;
++    }
++    atomic_store(&s_answering, s_awaiting || r.active || s_pend);
++    /* Muse's: asked, answered and waiting, or being read out. */
++    atomic_store(&s_museing, s_ask.active || s_deliver.pending || s_say_next || (r.active && r.from_muse));
++}
++
++static void task(void *arg)
++{
++    (void)arg;
++    uint32_t session = 0;
++    for (;;) {
++        uint32_t want = atomic_load(&s_session);
++        if (want != session) {
++            hang_up();
++            session = want;
++        }
++        if (!atomic_load(&s_want)) {
++            publish();
++            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
++            continue;
++        }
++        int state = atomic_load(&s_state);
++        if (state == MUSE_LIVE_FAILED) {
++            publish();
++            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
++            continue;
++        }
++        if (!muse_ws_is_open(s_ws)) {
++            if (state == MUSE_LIVE_CONNECTING) {
++                connect();
++            } else {
++                fail("LOST XAI");   /* a send failed: the conversation's context is gone with it */
++            }
++            continue;
++        }
++        if (state == MUSE_LIVE_CONNECTING && now_us() - s_setup_t0 > SETUP_US) {
++            fail("CAN'T REACH XAI");
++            continue;
++        }
++        if (atomic_exchange(&s_barge, false)) {
++            barge_in("you spoke over it");
++        }
++        drain_pending();
++        for (int i = 0; i < READS_PER_TICK && !s_pend; i++) {
++            int n = muse_ws_poll(s_ws);
++            if (n <= 0) {
++                break;
++            }
++        }
++        if (!muse_ws_is_open(s_ws)) {
++            fail("LOST XAI");
++            continue;
++        }
++        if (atomic_load(&s_state) == MUSE_LIVE_READY) {
++            send_mic();
++            muse_frames();
++            deliver();
++        }
++        publish();
++        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
++    }
++}
++
++/* --- API ------------------------------------------------------------------------------------------ */
++
++static bool ensure_task(void)
++{
++    if (s_task) {
++        return true;
++    }
++    s_ws = muse_ws_new(TAG, MSG_MAX, on_text, NULL);
++    s_mic = xStreamBufferCreateWithCaps(MIC_BUF, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    s_muse_q = xQueueCreate(MUSE_QUEUE, sizeof(muse_item_t));
++    s_ask.texts = heap_caps_malloc(MUSE_MSGS * MUSE_MSG_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    s_deliver.text = heap_caps_malloc(ANSWER_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!s_ws || !s_mic || !s_muse_q || !s_ask.texts || !s_deliver.text ||
++        xTaskCreatePinnedToCoreWithCaps(task, "muse_live", STACK, NULL, 5, &s_task, tskNO_AFFINITY,
++                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
++        ESP_LOGE(TAG, "can't start the live voice task");
++        s_task = NULL;
++        return false;
++    }
++    muse_hatch_set_console_sink(console_sink);
++    return true;
++}
++
++bool muse_live_configured(void)
++{
++    return muse_xai_tts_configured();
++}
++
++bool muse_live_open(StreamBufferHandle_t speaker)
++{
++    if (!muse_live_configured() || !ensure_task()) {
++        return false;
++    }
++    muse_xai_tts_close();   /* one xAI connection at a time */
++    s_speaker = speaker;
++    xStreamBufferReset(s_mic);
++    atomic_store(&s_barge, false);
++    atomic_store(&s_playing, false);
++    s_why[0] = '\0';
++    atomic_store(&s_state, MUSE_LIVE_CONNECTING);
++    atomic_store(&s_want, true);
++    atomic_fetch_add(&s_session, 1);
++    xTaskNotifyGive(s_task);
++    return true;
++}
++
++void muse_live_close(void)
++{
++    if (!s_task) {
++        return;
++    }
++    atomic_store(&s_want, false);
++    atomic_store(&s_state, MUSE_LIVE_OFF);
++    atomic_fetch_add(&s_session, 1);
++    xTaskNotifyGive(s_task);
++}
++
++bool muse_live_active(void)
++{
++    return atomic_load(&s_want);
++}
++
++void muse_live_status(muse_live_status_t *st, char *why, size_t cap)
++{
++    st->state = (muse_live_state_t)atomic_load(&s_state);
++    st->you = atomic_load(&s_you);
++    st->answering = atomic_load(&s_answering);
++    st->muse = atomic_load(&s_museing);
++    st->who = (muse_responder_t)atomic_load(&s_who);
++    st->flushes = atomic_load(&s_flushes);
++    if (why) {
++        strlcpy(why, s_why, cap);
++    }
++}
++
++void muse_live_mic(const int16_t *pcm, size_t frames)
++{
++    if (s_mic && atomic_load(&s_want)) {
++        xStreamBufferSend(s_mic, pcm, frames * sizeof(int16_t), 0);
++    }
++}
++
++void muse_live_barge_in(void)
++{
++    atomic_store(&s_barge, true);
++}
++
++void muse_live_set_playing(bool playing)
++{
++    atomic_store(&s_playing, playing);
++}
+diff --git a/esp32/components/muse/muse_live.h b/esp32/components/muse/muse_live.h
+new file mode 100644
+index 0000000..36ca2dc
+--- /dev/null
++++ b/esp32/components/muse/muse_live.h
+@@ -0,0 +1,73 @@
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "freertos/FreeRTOS.h"
++#include "freertos/stream_buffer.h"
++#include "muse_state.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * A spoken conversation with xAI's live voice (wss://api.x.ai/v1/realtime,
++ * Grok Voice), for the length of a hands-free conversation (live_talk boards,
++ * muse_voice.c). The voice task streams the mic in and plays what comes back;
++ * this module's task keeps the WebSocket. xAI's voice detection ends each of
++ * your turns and Grok answers small talk itself; anything personal (projects,
++ * plans, tasks, calendar, notes) it hands to Muse with its ask_muse tool, as a
++ * typed Muse turn (muse_hatch_text_turn), and Muse's answer is then read out
++ * word for word in the same voice. The protocol is the live-voice prototype's
++ * (prototype/live-voice/orchestrator.js on the live-voice-prototype branch).
++ *
++ * The API key is xAI's speech key (">xai_key=..." over serial, muse_xai_tts.h).
++ */
++
++typedef enum {
++    MUSE_LIVE_OFF,          /* not open */
++    MUSE_LIVE_CONNECTING,   /* connecting, or setting the session up */
++    MUSE_LIVE_READY,        /* talking */
++    MUSE_LIVE_FAILED,       /* couldn't connect, or the connection went: see `why` */
++} muse_live_state_t;
++
++/* What's going on, for the voice task's screen and quiet timer. */
++typedef struct {
++    muse_live_state_t state;
++    bool you;           /* xAI hears you talking */
++    bool answering;     /* a response asked for or under way */
++    bool muse;          /* Muse is working on a question, or its answer waits to be said */
++    muse_responder_t who;   /* whose words the response under way is */
++    uint32_t flushes;   /* bumped whenever the speaker's queued audio is to be dropped */
++} muse_live_status_t;
++
++/* An xAI key is stored. */
++bool muse_live_configured(void);
++
++/* Opens a conversation: connects in the background, and from then on puts the
++ * reply audio (16 kHz mono PCM) into `speaker`. False if there's no key. */
++bool muse_live_open(StreamBufferHandle_t speaker);
++
++/* Ends it: what's under way is dropped, a question out to Muse too. */
++void muse_live_close(void);
++
++/* A conversation is open or opening. */
++bool muse_live_active(void);
++
++void muse_live_status(muse_live_status_t *st, char *why, size_t cap);
++
++/* The mic, 16 kHz mono, to stream to xAI once the session is set up (it keeps
++ * up to 2 s while connecting). Never waits; what doesn't fit is dropped. */
++void muse_live_mic(const int16_t *pcm, size_t frames);
++
++/* You spoke over the reply (muse_echo.c): it's stopped and dropped. */
++void muse_live_barge_in(void);
++
++/* The voice task is playing reply audio: Muse's answer waits until it isn't. */
++void muse_live_set_playing(bool playing);
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/esp32/components/muse/muse_pixel.h b/esp32/components/muse/muse_pixel.h
 index fe603d8..6e8c2ec 100644
 --- a/esp32/components/muse/muse_pixel.h
@@ -3730,19 +5060,20 @@ index 6a372ac..50a82e1 100644
  }
  
 diff --git a/esp32/components/muse/muse_state.c b/esp32/components/muse/muse_state.c
-index 27377e2..7a96720 100644
+index 27377e2..e3aefa7 100644
 --- a/esp32/components/muse/muse_state.c
 +++ b/esp32/components/muse/muse_state.c
-@@ -38,6 +38,8 @@ static volatile float s_level;
+@@ -38,6 +38,9 @@ static volatile float s_level;
  static volatile float s_progress;
  static volatile int64_t s_last_poke_us;
  static volatile int64_t s_happy_until_us;
 +static volatile muse_reaction_t s_reaction;
++static volatile muse_responder_t s_responder;
 +static volatile int64_t s_reaction_us;
  static volatile bool s_asleep;
  
  static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
-@@ -76,7 +78,16 @@ void muse_state_set_mode(muse_mode_t mode)
+@@ -76,7 +79,16 @@ void muse_state_set_mode(muse_mode_t mode)
      if (s_mode == MUSE_MODE_OFF && mode != MUSE_MODE_IDLE) {
          return;
      }
@@ -3759,7 +5090,7 @@ index 27377e2..7a96720 100644
      s_mode = mode;
  }
  
-@@ -231,6 +242,22 @@ void muse_state_nudge(void)
+@@ -231,6 +243,32 @@ void muse_state_nudge(void)
      xEventGroupSetBits(s_wake, NUDGE_BIT);
  }
  
@@ -3768,6 +5099,16 @@ index 27377e2..7a96720 100644
 +    s_reaction_us = esp_timer_get_time();
 +    s_reaction = reaction;
 +    muse_state_poke();
++}
++
++void muse_state_set_responder(muse_responder_t who)
++{
++    s_responder = who;
++}
++
++muse_responder_t muse_state_responder(void)
++{
++    return s_responder;
 +}
 +
 +muse_reaction_t muse_state_reaction(float *secs)
@@ -3783,7 +5124,7 @@ index 27377e2..7a96720 100644
  {
      s_happy_until_us = esp_timer_get_time() + (int64_t)(HAPPY_SECS * 1e6f);
 diff --git a/esp32/components/muse/muse_state.h b/esp32/components/muse/muse_state.h
-index ecea3fe..123e386 100644
+index ecea3fe..1565501 100644
 --- a/esp32/components/muse/muse_state.h
 +++ b/esp32/components/muse/muse_state.h
 @@ -58,6 +58,9 @@ float muse_state_progress(void);
@@ -3796,7 +5137,7 @@ index ecea3fe..123e386 100644
  
  void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  /* Copies the caption if it changed since *version; returns true on change. */
-@@ -95,3 +98,18 @@ void muse_state_nudge(void);
+@@ -95,3 +98,28 @@ void muse_state_nudge(void);
  /* Touch/pet reaction. */
  void muse_state_make_happy(void);
  float muse_state_happiness(void);
@@ -3815,8 +5156,18 @@ index ecea3fe..123e386 100644
 +void muse_state_react(muse_reaction_t reaction);
 +/* The face asked for, and how long ago (secs may be NULL). */
 +muse_reaction_t muse_state_reaction(float *secs);
++
++/* Who is answering in a live conversation (muse_live.c), for the logo by the
++ * battery ring: Grok's voice on its own, or Muse, working on it or being read out. */
++typedef enum {
++    MUSE_RESPONDER_NONE,
++    MUSE_RESPONDER_GROK,
++    MUSE_RESPONDER_MUSE,
++} muse_responder_t;
++void muse_state_set_responder(muse_responder_t who);
++muse_responder_t muse_state_responder(void);
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..6b98186 100644
+index d0d4e2f..d191b70 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -3975,7 +5326,7 @@ index d0d4e2f..6b98186 100644
      if (!s_cells) {
          lv_obj_invalidate(s_canvas);
          return;
-@@ -502,24 +588,53 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
+@@ -502,24 +588,74 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
      return s_small ? compact : full;
  }
  
@@ -4010,6 +5361,27 @@ index d0d4e2f..6b98186 100644
 +extern const uint8_t s_tape_start[] asm("_binary_tape_rgb565a8_start");
 +static lv_image_dsc_t s_tape_dsc;
 +#endif
++#if MUSE_HAS_LOGOS
++/* Who's answering in a live conversation, by the battery ring: u16 w, u16 h, then RGB565A8 (avatar/make_icons.py). */
++extern const uint8_t s_grok_logo[] asm("_binary_grok_rgb565a8_start");
++extern const uint8_t s_muse_logo[] asm("_binary_muse_rgb565a8_start");
++static lv_image_dsc_t s_logo_dsc[2];   /* Grok, Muse */
++static lv_obj_t *s_logo;
++static muse_responder_t s_logo_shown;
++#define LOGO_DX -40                    /* left of the battery ring's centre, level with it */
++
++static void logo_dsc(lv_image_dsc_t *d, const uint8_t *src)
++{
++    uint16_t w = src[0] | src[1] << 8, h = src[2] | src[3] << 8;
++    d->header.magic = LV_IMAGE_HEADER_MAGIC;
++    d->header.cf = LV_COLOR_FORMAT_RGB565A8;
++    d->header.w = w;
++    d->header.h = h;
++    d->header.stride = w * 2;
++    d->data = src + 4;
++    d->data_size = (uint32_t)w * h * 3;
++}
++#endif
  
 -/* unscii-16 for captions and replies; with CONFIG_MUSE_CJK_FONT, a copy that
 - * falls back to Unifont's 16x16 CJK, the same cell, for what unscii lacks. */
@@ -4038,7 +5410,7 @@ index d0d4e2f..6b98186 100644
  }
  
  static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
-@@ -666,8 +781,15 @@ static void set_answer(int which)
+@@ -666,8 +802,15 @@ static void set_answer(int which)
      if (!muse_board->round) {
          lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
      }
@@ -4055,7 +5427,7 @@ index d0d4e2f..6b98186 100644
          lv_obj_align(s_reply_lbl, LV_ALIGN_CENTER, 0, l->top + l->h / 2);
          lv_obj_set_style_text_align(s_reply_lbl, l->align, 0);
      }
-@@ -684,10 +806,15 @@ static bool fits_across(int w, int y, int ring_in)
+@@ -684,10 +827,15 @@ static bool fits_across(int w, int y, int ring_in)
      return w * w / 4 + y * y <= r * r;
  }
  
@@ -4072,7 +5444,7 @@ index d0d4e2f..6b98186 100644
      if (muse_board->round) {
          int r = ring_in - 6;
          int chord = w / 2 < r ? (int)sqrtf((float)(r * r - w * w / 4)) : 0;
-@@ -765,6 +892,11 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -765,6 +913,11 @@ static void build_answer(lv_obj_t *face, int ring_in)
      }
  
      l = &s_answers[ANSWER_READ];
@@ -4084,7 +5456,7 @@ index d0d4e2f..6b98186 100644
      int status_bottom = (muse_board->rim_controls ? 40 : 20 + s_dy) + 16 - s_h / 2;
      l->px = MUSE_PX_W * MINI_CELL_PX;
      l->y = status_bottom + 2 + l->px / 2;   /* its sparkles clear of the status line */
-@@ -774,17 +906,23 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -774,17 +927,23 @@ static void build_answer(lv_obj_t *face, int ring_in)
      set_reply_box(l, muse_board->rim_controls ? 13 : 16, 2, top, cw, pitch);
      /* The widest page isn't the biggest: a round screen narrows towards the bottom. */
      /* Keep read replies in a central column clear of dedicated rim hints. */
@@ -4110,7 +5482,7 @@ index d0d4e2f..6b98186 100644
      ESP_LOGI(TAG, "reply pages: %d x %d heard, %d x %d read", s_answers[ANSWER_HEARD].cols,
               s_answers[ANSWER_HEARD].lines, l->cols, l->lines);
  
-@@ -794,6 +932,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -794,6 +953,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
      lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
      lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
      lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -4118,7 +5490,7 @@ index d0d4e2f..6b98186 100644
  
      if (muse_board->touch && !muse_board->rim_controls) {
          build_speaker(face, spk_x, spk_y);
-@@ -801,7 +940,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -801,7 +961,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
  
      /* Out of the way while a page is up: the mode name, where Muse was. */
      lv_obj_update_layout(face);
@@ -4129,7 +5501,7 @@ index d0d4e2f..6b98186 100644
      s_answers[ANSWER_READ].hides[1] = s_name_lbl;   /* the reply takes the top too */
      add_hides(&s_answers[ANSWER_READ], 2);
      add_hides(&s_answers[ANSWER_HEARD], 0);
-@@ -897,7 +1038,7 @@ static void build_screen(void)
+@@ -897,7 +1059,7 @@ static void build_screen(void)
       * whose blank bottom rows can tuck in behind the meter.
       */
      int ring_in = (s_w < s_h ? s_w : s_h) / 2 - 10;   /* the ring's inner edge */
@@ -4138,7 +5510,7 @@ index d0d4e2f..6b98186 100644
      int cap_bottom = 179;                              /* a 466 px circle's; fine for rectangles */
      if (muse_board->round) {
          cap_bottom = (int)sqrtf((float)(ring_in * ring_in - CAPTION_W * CAPTION_W / 4)) - 3;
-@@ -906,6 +1047,14 @@ static void build_screen(void)
+@@ -906,6 +1068,14 @@ static void build_screen(void)
      int meter_y = cap_top - 6 - METER_SEG_PX / 2;
      int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
      s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
@@ -4153,7 +5525,7 @@ index d0d4e2f..6b98186 100644
  
      /* The character. */
      muse_image_init();
-@@ -933,24 +1082,31 @@ static void build_screen(void)
+@@ -933,24 +1103,31 @@ static void build_screen(void)
      s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
@@ -4190,7 +5562,7 @@ index d0d4e2f..6b98186 100644
          lv_label_set_long_mode(s_state_lbl, LV_LABEL_LONG_MODE_DOTS);
          lv_label_set_long_mode(s_name_lbl, LV_LABEL_LONG_MODE_DOTS);
      }
-@@ -984,11 +1140,53 @@ static void build_screen(void)
+@@ -984,11 +1161,53 @@ static void build_screen(void)
          return;
      }
      /* Fixed height: a longer caption ends in dots rather than growing into the ring. */
@@ -4245,7 +5617,7 @@ index d0d4e2f..6b98186 100644
      /* Chunky level meter. */
      int span = METER_SEGS * (METER_SEG_PX + METER_GAP_PX) - METER_GAP_PX;
      for (int i = 0; i < METER_SEGS; i++) {
-@@ -996,6 +1194,7 @@ static void build_screen(void)
+@@ -996,6 +1215,7 @@ static void build_screen(void)
          lv_obj_remove_style_all(seg);
          lv_obj_remove_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
          lv_obj_set_size(seg, METER_SEG_PX, METER_SEG_PX);
@@ -4253,7 +5625,7 @@ index d0d4e2f..6b98186 100644
          lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
          lv_obj_set_style_bg_color(seg, lv_color_hex(COLOR_METER_OFF), 0);
          int x = -span / 2 + i * (METER_SEG_PX + METER_GAP_PX) + METER_SEG_PX / 2;
-@@ -1010,6 +1209,9 @@ static void build_screen(void)
+@@ -1010,6 +1230,9 @@ static void build_screen(void)
  static void on_cover_event(lv_event_t *e)
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
@@ -4263,7 +5635,7 @@ index d0d4e2f..6b98186 100644
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
          muse_state_set_asleep(false);
-@@ -1109,9 +1311,19 @@ static void update_control_hints(muse_mode_t mode)
+@@ -1109,9 +1332,19 @@ static void update_control_hints(muse_mode_t mode)
      if (!s_ptt_hint) return;
      /* Don't obscure settings rows/keyboards with floating physical icons. */
      bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
@@ -4286,7 +5658,7 @@ index d0d4e2f..6b98186 100644
      static int last_mode = -1;
      if ((int)mode != last_mode) {
          color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
-@@ -1139,6 +1351,7 @@ static void build_overlays(void)
+@@ -1139,6 +1372,7 @@ static void build_overlays(void)
          lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
          lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
          lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
@@ -4294,7 +5666,7 @@ index d0d4e2f..6b98186 100644
          s_dots[i] = d;
      }
  
-@@ -1173,6 +1386,107 @@ static void build_overlays(void)
+@@ -1173,6 +1407,118 @@ static void build_overlays(void)
          update_control_hints(MUSE_MODE_BOOT);
      }
  
@@ -4338,6 +5710,17 @@ index d0d4e2f..6b98186 100644
 +                         muse_board->battery_ring.y - 26);
 +            lv_obj_add_flag(s_mic_dot, LV_OBJ_FLAG_HIDDEN);
 +        }
++#if MUSE_HAS_LOGOS
++        if (muse_board->live_talk) {
++            logo_dsc(&s_logo_dsc[0], s_grok_logo);
++            logo_dsc(&s_logo_dsc[1], s_muse_logo);
++            s_logo = lv_image_create(scr);
++            lv_obj_remove_flag(s_logo, LV_OBJ_FLAG_CLICKABLE);
++            lv_obj_align(s_logo, muse_board->battery_ring.align, muse_board->battery_ring.x + LOGO_DX,
++                         muse_board->battery_ring.y);
++            lv_obj_add_flag(s_logo, LV_OBJ_FLAG_HIDDEN);
++        }
++#endif
 +    }
 +
 +#if MUSE_HAS_TAPE
@@ -4402,7 +5785,7 @@ index d0d4e2f..6b98186 100644
      /* BLE pairing code, or the Muse app's ask for the talk button: a centred
       * column in one typeface, the code large. The small card grows with the hint. */
      s_pair = lv_obj_create(lv_layer_top());
-@@ -1302,8 +1616,8 @@ static void update_chrome(float now)
+@@ -1302,8 +1648,8 @@ static void update_chrome(float now)
          int shown = page * 2 + subpage;
          if (shown != s_shown_page) {
              for (int i = 0; i < 2; i++) {
@@ -4413,7 +5796,7 @@ index d0d4e2f..6b98186 100644
              }
              s_shown_page = shown;
          }
-@@ -1318,6 +1632,9 @@ static void update_chrome(float now)
+@@ -1318,6 +1664,9 @@ static void update_chrome(float now)
      if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
          lv_label_set_text(s_wifi_icon, wifi);
      }
@@ -4423,7 +5806,7 @@ index d0d4e2f..6b98186 100644
      s_idle_name = idle_name(w.state);
      muse_ble_status_t b;
      muse_ble_status(&b);
-@@ -1337,7 +1654,7 @@ static void update_chrome(float now)
+@@ -1337,7 +1686,7 @@ static void update_chrome(float now)
       * read layout unhides it on the way out. A narrow screen gets the hex tail
       * on its own, which is the part that differs between two of them, rather
       * than a head that ends in dots before it gets there. */
@@ -4432,7 +5815,7 @@ index d0d4e2f..6b98186 100644
      int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
      const char *shown = paired ? "" : b.name;
  #if LV_USE_SNAPSHOT
-@@ -1376,7 +1693,11 @@ static void update_chrome(float now)
+@@ -1376,7 +1725,11 @@ static void update_chrome(float now)
              lv_label_set_text(s_pair_hint, hint);
          }
      }
@@ -4445,7 +5828,7 @@ index d0d4e2f..6b98186 100644
  
      bool speaker = muse_settings_speaker_on();   /* also set from settings, the phone and serial */
      if (s_speaker && (int)speaker != s_shown_speaker) {
-@@ -1442,6 +1763,17 @@ static void update_power(float now)
+@@ -1442,6 +1795,17 @@ static void update_power(float now)
      if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
          lv_label_set_text(s_power_lbl, buf);
      }
@@ -4463,7 +5846,7 @@ index d0d4e2f..6b98186 100644
  }
  
  static void update_status(muse_mode_t mode, float now)
-@@ -1450,13 +1782,17 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1450,13 +1814,17 @@ static void update_status(muse_mode_t mode, float now)
      const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
  
      if (name != s_shown_name) {
@@ -4484,7 +5867,7 @@ index d0d4e2f..6b98186 100644
          } else {
              lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
          }
-@@ -1465,12 +1801,31 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1465,13 +1833,43 @@ static void update_status(muse_mode_t mode, float now)
          s_shown_lit = -1;
      }
  
@@ -4516,10 +5899,22 @@ index d0d4e2f..6b98186 100644
 +    bool dot = live_mic && !s_on_settings;   /* hidden on settings, with the battery ring */
 +    if (s_mic_dot && dot == lv_obj_has_flag(s_mic_dot, LV_OBJ_FLAG_HIDDEN)) {
 +        lv_obj_set_flag(s_mic_dot, LV_OBJ_FLAG_HIDDEN, !dot);
++    }
++#if MUSE_HAS_LOGOS
++    /* Grok's or Muse's logo while one of them answers; hidden on settings, with the ring. */
++    muse_responder_t who = s_on_settings ? MUSE_RESPONDER_NONE : muse_state_responder();
++    if (s_logo && who != s_logo_shown) {
++        s_logo_shown = who;
++        if (who != MUSE_RESPONDER_NONE) {
++            lv_image_set_src(s_logo, &s_logo_dsc[who == MUSE_RESPONDER_MUSE]);
++        }
++        lv_obj_set_flag(s_logo, LV_OBJ_FLAG_HIDDEN, who == MUSE_RESPONDER_NONE);
      }
++#endif
      if (s_ring && mode == MUSE_MODE_THINKING) {
          /* Move the indicator rather than rotate the arc: a rotation redraws
-@@ -1498,7 +1853,7 @@ static void update_status(muse_mode_t mode, float now)
+          * the whole ring, and with it the whole screen. */
+@@ -1498,7 +1896,7 @@ static void update_status(muse_mode_t mode, float now)
      }
  
      /* The mic's meter; a reply's page has the room while answering. */
@@ -4528,7 +5923,7 @@ index d0d4e2f..6b98186 100644
      set_meter_visible(meter);
      if (meter && !s_small) {
          int lit = (int)lroundf(s_level * METER_SEGS);
-@@ -1528,6 +1883,11 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1528,6 +1926,11 @@ static void update_status(muse_mode_t mode, float now)
          if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING) {
              answer = layout;
          }
@@ -4540,7 +5935,7 @@ index d0d4e2f..6b98186 100644
      }
      if (answer != s_answer) {
          set_answer(answer);
-@@ -1540,12 +1900,40 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1540,12 +1943,40 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif
@@ -4583,7 +5978,7 @@ index d0d4e2f..6b98186 100644
      update_power(now);
  }
  
-@@ -1644,12 +2032,16 @@ static void frame_tick(lv_timer_t *timer)
+@@ -1644,12 +2075,16 @@ static void frame_tick(lv_timer_t *timer)
      float level = muse_state_level();
      s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
  
@@ -4600,7 +5995,7 @@ index d0d4e2f..6b98186 100644
      };
      muse_pixel_render(&pose);
      invalidate_muse();
-@@ -1709,6 +2101,9 @@ esp_err_t muse_ui_start(void)
+@@ -1709,6 +2144,9 @@ esp_err_t muse_ui_start(void)
      muse_board->display_unlock();
  
      ESP_LOGI(TAG, "UI up: %dx%d, %d px Muse, %d ms frames", s_w, s_h, s_canvas_px, muse_board->frame_ms);
@@ -4738,19 +6133,23 @@ index 0000000..b48fd58
 +/* One chunk's level; returns the state after it. */
 +muse_vad_state_t muse_vad_feed(muse_vad_t *v, float db);
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 38c7c9d..e6fb866 100644
+index 38c7c9d..f2ec9ec 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
-@@ -31,6 +31,8 @@
+@@ -31,6 +31,12 @@
  #include "muse_adpcm.h"
  #include "muse_audio.h"
  #include "muse_board.h"
 +#include "muse_vad.h"
++#include "muse_echo.h"
++#if CONFIG_MUSE_HATCH
++#include "muse_live.h"
++#endif
 +#include "muse_gemini_tts.h"
  #include "muse_chat.h"
  #include "muse_input.h"
  #include "muse_mem.h"
-@@ -50,6 +52,13 @@ static const char *TAG = "muse_voice";
+@@ -50,6 +56,20 @@ static const char *TAG = "muse_voice";
  #define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */
  #endif
  #define SETTLE_CHUNKS 10   /* after Muse makes a sound, 200 ms of capture is its own tail */
@@ -4761,10 +6160,55 @@ index 38c7c9d..e6fb866 100644
 +#define LONG_PRESS_MS 500
 +#define FIRST_QUIET_MS 6000          /* right after the long press */
 +#define CONVERSATION_QUIET_MS 8000   /* after a reply */
++
++/* live_talk boards (converse_live()): the reply audio's buffer, how much of a
++ * reply is in hand before it plays, and how long after the speaker stops the
++ * mic still belongs to the echo gate (muse_echo.c) rather than going to xAI. */
++#define LIVE_SPEAKER_BYTES (4 * MUSE_AUDIO_RATE * 2)   /* 4 s */
++#define LIVE_START_BYTES (MUSE_AUDIO_RATE * 2 / 5)     /* 200 ms: network hiccups don't gap the voice */
++#define LIVE_TAIL_CHUNKS 15                            /* 300 ms */
  #define REST_BACKSTOP_MS 60000
  
  #if CONFIG_MUSE_HATCH
-@@ -238,6 +247,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -139,6 +159,20 @@ static void pre_reset(void)
+     s_settle = SETTLE_CHUNKS;
+ }
+ 
++/* Keeps one chunk in the pre-roll ring. */
++static void pre_put(const int16_t *pcm)
++{
++    pre_chunk_t *c = &s_pre[s_pre_next];
++#if MUSE_LOW_MEM
++    c->start = s_pre_enc;
++    muse_adpcm_encode_block(&s_pre_enc, pcm, MUSE_AUDIO_CHUNK, c->adpcm);
++#else
++    memcpy(c->pcm, pcm, sizeof(c->pcm));
++#endif
++    s_pre_next = (s_pre_next + 1) % PRE_CHUNKS;
++    s_pre_fill = s_pre_fill < PRE_CHUNKS ? s_pre_fill + 1 : PRE_CHUNKS;
++}
++
+ /* One 20 ms idle read: feeds the pre-roll ring and the settings mic meter. */
+ static void idle_capture(void)
+ {
+@@ -154,15 +188,7 @@ static void idle_capture(void)
+         s_settle--;
+         return;
+     }
+-    pre_chunk_t *c = &s_pre[s_pre_next];
+-#if MUSE_LOW_MEM
+-    c->start = s_pre_enc;
+-    muse_adpcm_encode_block(&s_pre_enc, s_chunk, MUSE_AUDIO_CHUNK, c->adpcm);
+-#else
+-    memcpy(c->pcm, s_chunk, sizeof(c->pcm));
+-#endif
+-    s_pre_next = (s_pre_next + 1) % PRE_CHUNKS;
+-    s_pre_fill = s_pre_fill < PRE_CHUNKS ? s_pre_fill + 1 : PRE_CHUNKS;
++    pre_put(s_chunk);
+ }
+ 
+ /* Non-blocking: returns true if an event of `type` arrived (others dropped). */
+@@ -238,6 +264,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
      feed_live();
  }
  
@@ -4788,7 +6232,7 @@ index 38c7c9d..e6fb866 100644
  /*
   * Records speech until release or MAX_SECS, starting with the pre-roll; *held
   * gets the part after the press. It streams to Hatch as it goes if it can.
-@@ -246,8 +272,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -246,8 +289,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
   * kept note to fall back on (why says what failed). There is no start chirp:
   * anything played now would land on top of the first words.
   */
@@ -4808,7 +6252,7 @@ index 38c7c9d..e6fb866 100644
      muse_state_set_mode(MUSE_MODE_LISTENING);
      muse_state_set_progress(0);
      s_rec_n = s_sent = 0;
-@@ -255,7 +291,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -255,7 +308,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
      if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
          go_live();
      }
@@ -4817,7 +6261,7 @@ index 38c7c9d..e6fb866 100644
      bool heard = false, ok = true;
      bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
      char text[96];
-@@ -271,6 +307,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -271,6 +324,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          for (size_t i = 0; i < s_pre_fill; i++) {
              pre_get(i, s_chunk);
              take(&st, s_chunk);
@@ -4825,7 +6269,7 @@ index 38c7c9d..e6fb866 100644
              n += MUSE_AUDIO_CHUNK;
          }
      }
-@@ -283,13 +320,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -283,13 +337,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          }
          muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
          take(&st, s_chunk);
@@ -4850,7 +6294,7 @@ index 38c7c9d..e6fb866 100644
              } else if (ev == MUSE_HATCH_EV_ERROR) {
                  ESP_LOGW(TAG, "muse: %s", text);
                  muse_hatch_turn_cancel();
-@@ -309,19 +356,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -309,19 +373,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
              go_live();
          }
          muse_state_set_progress((float)n / MAX_FRAMES);
@@ -4885,7 +6329,7 @@ index 38c7c9d..e6fb866 100644
      *held = n - pre;
  
      char tail[160];
-@@ -347,7 +407,7 @@ static void go_idle(const char *caption);
+@@ -347,7 +424,7 @@ static void go_idle(const char *caption);
  static bool hatch_reply(bool *delivered)
  {
      muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4894,7 +6338,7 @@ index 38c7c9d..e6fb866 100644
      static int16_t buf[MUSE_AUDIO_CHUNK];
      static const int16_t silence[MUSE_AUDIO_CHUNK];
      char text[96];
-@@ -355,20 +415,22 @@ static bool hatch_reply(bool *delivered)
+@@ -355,20 +432,22 @@ static bool hatch_reply(bool *delivered)
      bool done = false, speaking = false, replied = false;
      size_t played = 0;
      int64_t t0 = esp_timer_get_time();
@@ -4919,7 +6363,7 @@ index 38c7c9d..e6fb866 100644
                  }
                  break;
              case MUSE_HATCH_EV_REPLY:
-@@ -407,6 +469,7 @@ static bool hatch_reply(bool *delivered)
+@@ -407,6 +486,7 @@ static bool hatch_reply(bool *delivered)
              muse_state_set_level(muse_audio_level(buf, n));
              muse_audio_write(buf, n);
              played += n;
@@ -4927,7 +6371,7 @@ index 38c7c9d..e6fb866 100644
          } else if (done) {
              break;
          } else if (speaking) {
-@@ -414,14 +477,30 @@ static bool hatch_reply(bool *delivered)
+@@ -414,14 +494,30 @@ static bool hatch_reply(bool *delivered)
              muse_state_set_level(0);
              muse_audio_write(silence, MUSE_AUDIO_CHUNK);
          }
@@ -4960,7 +6404,7 @@ index 38c7c9d..e6fb866 100644
      if (!played) {
          /* No speech (TTS unavailable): leave the reply text up for a moment. */
          vTaskDelay(pdMS_TO_TICKS(2500));
-@@ -496,6 +575,22 @@ static bool held_on_waking(void)
+@@ -496,6 +592,22 @@ static bool held_on_waking(void)
      return !got_event(MUSE_PTT_UP);
  }
  
@@ -4983,7 +6427,7 @@ index 38c7c9d..e6fb866 100644
  static void drop_rec(void)
  {
      free(s_rec);
-@@ -639,7 +734,7 @@ static bool send_held(bool quiet)
+@@ -639,7 +751,7 @@ static bool send_held(bool quiet)
               h->tries + 1);
      if (!quiet) {
          muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4992,7 +6436,7 @@ index 38c7c9d..e6fb866 100644
      }
      muse_hatch_turn_begin();
      size_t sent = 0;
-@@ -665,7 +760,7 @@ static bool send_held(bool quiet)
+@@ -665,7 +777,7 @@ static bool send_held(bool quiet)
          s_next_send_us = 0;   /* the next one right away */
          s_send_backoff_us = RETRY_MIN_US;
          if (quiet) {
@@ -5001,7 +6445,7 @@ index 38c7c9d..e6fb866 100644
          }
          return interrupted;
      } else if (++h->tries >= HELD_TRIES) {
-@@ -728,7 +823,7 @@ static bool finish_note(void)
+@@ -728,7 +840,7 @@ static bool finish_note(void)
          if (s_live && !fed) {
              /* Hatch is behind (still connecting, say): the rest from the kept note. */
              muse_state_set_mode(MUSE_MODE_THINKING);
@@ -5010,7 +6454,7 @@ index 38c7c9d..e6fb866 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
-@@ -786,6 +881,56 @@ static bool can_record(void)
+@@ -786,6 +898,237 @@ static bool can_record(void)
      return true;
  }
  
@@ -5064,10 +6508,191 @@ index 38c7c9d..e6fb866 100644
 +    }
 +}
 +
++#if CONFIG_MUSE_HATCH
++static StreamBufferHandle_t s_speaker;   /* live_talk: reply audio from muse_live.c */
++
++static void drain_speaker(void)
++{
++    static uint8_t junk[512];
++    while (xStreamBufferReceive(s_speaker, junk, sizeof(junk), 0)) {
++    }
++}
++
++/* What a live conversation shows: talking, listening, or waiting on Grok or Muse. */
++static void show_live(muse_mode_t mode)
++{
++    if (mode == muse_state_mode(NULL)) {
++        return;
++    }
++    muse_state_set_mode(mode);
++    if (mode == MUSE_MODE_LISTENING) {
++        status("LISTENING", MUSE_CAPTION_DOTS);
++    } else if (mode == MUSE_MODE_THINKING) {
++        status("THINKING", MUSE_CAPTION_DOTS);
++    }   /* speaking: muse_live.c captions what's said */
++}
++
++/*
++ * live_talk: a hands-free conversation with xAI's live voice (muse_live.c),
++ * from a long press. Every 20 ms it plays a chunk of the reply (if there is
++ * one) and reads one from the mic: the mic goes to xAI, whose voice detection
++ * ends each turn, except while the speaker plays and just after, when it goes
++ * to the echo gate instead. Talking over the reply (muse_echo.c) stops it, and
++ * what you said from just before goes to xAI. It ends after FIRST_QUIET_MS
++ * (CONVERSATION_QUIET_MS once there's been a reply) with nobody talking,
++ * nothing playing and nothing waiting on Grok or Muse, on a click, or if the
++ * connection fails, whose reason stays up.
++ */
++static void converse_live(void)
++{
++    if (!muse_live_configured()) {
++        go_idle("SET AN XAI KEY");
++        return;
++    }
++    if (!s_speaker) {
++        s_speaker = xStreamBufferCreateWithCaps(LIVE_SPEAKER_BYTES, 1, MUSE_BIG_CAPS);
++    }
++    if (!s_speaker || (drain_speaker(), !muse_live_open(s_speaker))) {
++        go_idle("CAN'T START GROK");
++        return;
++    }
++    ESP_LOGI(TAG, "live conversation: started");
++    show_live(MUSE_MODE_LISTENING);
++    /* The long press's pre-roll: the first words may already be in it. */
++    for (size_t i = 0; i < s_pre_fill; i++) {
++        pre_get(i, s_chunk);
++        muse_live_mic(s_chunk, MUSE_AUDIO_CHUNK);
++    }
++    s_pre_fill = 0;
++    static int16_t out[MUSE_AUDIO_CHUNK];
++    muse_echo_t echo;
++    muse_echo_init(&echo);
++    muse_live_status_t st;
++    char why[64];
++    muse_live_status(&st, NULL, 0);
++    uint32_t flushes = st.flushes;
++    bool playing = false, replied = false;
++    int tail = 0, barge_ins = 0, short_of = 0;   /* short_of: chunks the reply ran dry mid-way */
++    int64_t t0 = esp_timer_get_time(), quiet_since = t0;
++    const char *end = "";
++    for (;;) {
++        muse_live_status(&st, why, sizeof(why));
++        if (st.state == MUSE_LIVE_FAILED) {
++            end = why;
++            break;
++        }
++        if (got_event(MUSE_PTT_DOWN)) {
++            ESP_LOGI(TAG, "live conversation: ended (click) after %.0fs", (esp_timer_get_time() - t0) / 1e6);
++            break;
++        }
++        if (st.flushes != flushes) {   /* a barge-in: what's queued is stale */
++            flushes = st.flushes;
++            drain_speaker();
++            playing = false;
++        }
++
++        /* The speaker: a chunk of the reply, once enough of it is in hand. */
++        size_t have = xStreamBufferBytesAvailable(s_speaker);
++        if (!playing && (have >= LIVE_START_BYTES || (have && !st.answering))) {
++            playing = true;
++        }
++        float spk_db = -100.0f;
++        if (playing) {
++            /* Whole chunks only while more is coming: a part-chunk padded out would be a gap in a word. */
++            size_t n = have >= sizeof(out) || !st.answering ? xStreamBufferReceive(s_speaker, out, sizeof(out), 0) : 0;
++            if (!n && st.answering) {
++                short_of++;
++            }
++            if (!n && !st.answering) {
++                playing = false;   /* the reply is over */
++                replied = true;
++                tail = LIVE_TAIL_CHUNKS;
++                ESP_LOGI(TAG, "reply played (%d ms short of audio); the mic hears the speaker at %+.1f dB, room %.0f dBFS",
++                         short_of * 20, echo.coupling_db, echo.room_db);
++                short_of = 0;
++            } else {
++                memset((uint8_t *)out + n, 0, sizeof(out) - n);   /* short of audio: silence, not stale DMA */
++                spk_db = muse_audio_dbfs(out, MUSE_AUDIO_CHUNK);
++                muse_state_set_level(muse_audio_level(out, MUSE_AUDIO_CHUNK));
++                muse_audio_write(out, MUSE_AUDIO_CHUNK);
++            }
++        }
++        muse_live_set_playing(playing);
++
++        /* The mic: to xAI, or while the speaker is on, to the echo gate. */
++        if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
++            vTaskDelay(pdMS_TO_TICKS(20));
++            continue;
++        }
++        if (playing || tail > 0) {
++            tail = playing ? tail : tail - 1;
++            pre_put(s_chunk);
++            float mic_db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
++            if (muse_echo_feed(&echo, spk_db, mic_db)) {
++                ESP_LOGI(TAG, "barge-in: mic %.0f dBFS, the speaker's echo %.0f", mic_db, muse_echo_expected_db(&echo));
++                barge_ins++;
++                muse_live_barge_in();
++                drain_speaker();
++                playing = false;
++                tail = 0;
++                muse_live_set_playing(false);
++                /* What you said from just before, not the echo before that. */
++                size_t from = s_pre_fill > MUSE_ECHO_ONSET_CHUNKS + 2 ? s_pre_fill - MUSE_ECHO_ONSET_CHUNKS - 2 : 0;
++                for (size_t i = from; i < s_pre_fill; i++) {
++                    pre_get(i, s_chunk);
++                    muse_live_mic(s_chunk, MUSE_AUDIO_CHUNK);
++                }
++            }
++            if (!playing && tail == 0) {
++                s_pre_fill = 0;   /* the speaker's tail: not for xAI */
++                muse_echo_reset(&echo);
++            }
++        } else {
++            muse_live_mic(s_chunk, MUSE_AUDIO_CHUNK);
++        }
++
++        /* The screen, and who's answering. */
++        muse_mode_t mode = playing                       ? MUSE_MODE_SPEAKING
++                           : st.you                      ? MUSE_MODE_LISTENING
++                           : st.answering || st.muse ? MUSE_MODE_THINKING
++                                                         : MUSE_MODE_LISTENING;
++        show_live(mode);
++        if (mode == MUSE_MODE_LISTENING) {
++            muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
++        } else if (mode == MUSE_MODE_THINKING) {
++            muse_state_set_level(0);
++        }
++        muse_state_set_responder(playing      ? st.who
++                                 : st.muse    ? MUSE_RESPONDER_MUSE
++                                 : st.answering ? MUSE_RESPONDER_GROK
++                                                : MUSE_RESPONDER_NONE);
++
++        /* Nobody's said anything, and nothing's going on, for a while: it's over. */
++        int64_t now = esp_timer_get_time();
++        if (playing || tail || st.you || st.answering || st.muse || st.state == MUSE_LIVE_CONNECTING) {
++            quiet_since = now;
++        } else if (now - quiet_since > (replied ? CONVERSATION_QUIET_MS : FIRST_QUIET_MS) * 1000LL) {
++            ESP_LOGI(TAG, "live conversation: ended (quiet) after %.0fs, %d barge-in%s", (now - t0) / 1e6, barge_ins,
++                     barge_ins == 1 ? "" : "s");
++            break;
++        }
++    }
++    muse_live_close();
++    drain_speaker();
++    muse_state_set_level(0);
++    muse_state_set_responder(MUSE_RESPONDER_NONE);
++    pre_reset();
++    if (end[0]) {
++        ESP_LOGW(TAG, "live conversation: ended (%s)", end);
++    }
++    go_idle(end);
++}
++#endif
++
  static void voice_task(void *arg)
  {
      bool pending_down = false;
-@@ -806,7 +951,6 @@ static void voice_task(void *arg)
+@@ -806,7 +1149,6 @@ static void voice_task(void *arg)
                  pending_down = send_held(asleep);
                  pre_reset();
                  if (!pending_down && !asleep && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
@@ -5075,7 +6700,7 @@ index 38c7c9d..e6fb866 100644
                      go_idle("");
                  }
                  continue;
-@@ -854,6 +998,23 @@ static void voice_task(void *arg)
+@@ -854,6 +1196,29 @@ static void voice_task(void *arg)
              }
              wake = ev.wake;
          }
@@ -5093,13 +6718,19 @@ index 38c7c9d..e6fb866 100644
 +                continue;
 +            }
 +            muse_wifi_power(MUSE_WIFI_FULL);
++#if CONFIG_MUSE_HATCH
++            if (muse_board->live_talk) {
++                converse_live();
++                continue;
++            }
++#endif
 +            converse();
 +            continue;
 +        }
          if (wake && !held_on_waking()) {
              continue;   /* a tap: it only woke Muse */
          }
-@@ -864,7 +1025,8 @@ static void voice_task(void *arg)
+@@ -864,7 +1229,8 @@ static void voice_task(void *arg)
          }
          size_t held;
          char why[96];
@@ -5109,7 +6740,7 @@ index 38c7c9d..e6fb866 100644
          pending_down = false;
          if (held < MIN_HELD_FRAMES && !wake) {
              muse_hatch_turn_cancel();
-@@ -880,8 +1042,9 @@ static void voice_task(void *arg)
+@@ -880,8 +1246,9 @@ static void voice_task(void *arg)
          }
          pending_down = finish_note();
          pre_reset();
@@ -5120,12 +6751,507 @@ index 38c7c9d..e6fb866 100644
              go_idle("");
          }
      }
+diff --git a/esp32/components/muse/muse_ws.c b/esp32/components/muse/muse_ws.c
+new file mode 100644
+index 0000000..5c10f32
+--- /dev/null
++++ b/esp32/components/muse/muse_ws.c
+@@ -0,0 +1,445 @@
++#include "muse_ws.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++#include "esp_crt_bundle.h"
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "esp_random.h"
++#include "esp_timer.h"
++#include "esp_tls.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include "lwip/sockets.h"
++#include "mbedtls/base64.h"
++
++#define RX_BUF 4096
++#define HDR_LINE_MAX 1024
++#define HEAD_MAX 768
++#define ERR_MAX 400
++#define IO_TIMEOUT_US (20 * 1000000LL)
++#define CONNECT_TIMEOUT_MS 10000
++
++/* WebSocket opcodes (RFC 6455). */
++#define WS_CONT 0x0
++#define WS_TEXT 0x1
++#define WS_BINARY 0x2
++#define WS_CLOSE 0x8
++#define WS_PING 0x9
++#define WS_PONG 0xA
++
++struct muse_ws {
++    const char *tag;
++    muse_ws_on_text_t on_text;
++    void *ctx;
++    esp_tls_t *tls;
++    esp_tls_client_session_t *ticket;   /* resumes the TLS session on reconnect */
++    struct {
++        uint8_t buf[RX_BUF];
++        size_t pos, len;
++    } rx;
++    /* Incoming frames, a byte at a time, so reading never has to block. */
++    struct {
++        enum { F_HDR0, F_HDR1, F_EXTLEN, F_MASK, F_PAYLOAD } st;
++        uint8_t op, msg_op;
++        bool fin, masked;
++        uint8_t ext_need, ext_got, mask[4], mask_got;
++        uint64_t len, got;
++        uint8_t ctl[125];                 /* a control frame's payload */
++        bool overflow;                    /* the message outgrew msg_max */
++    } f;
++    char *msg;                            /* msg_max: a whole text message */
++    size_t msg_len, msg_max;
++};
++
++static inline int64_t now_us(void)
++{
++    return esp_timer_get_time();
++}
++
++muse_ws_t *muse_ws_new(const char *tag, size_t msg_max, muse_ws_on_text_t on_text, void *ctx)
++{
++    muse_ws_t *ws = heap_caps_calloc(1, sizeof(*ws), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    char *msg = heap_caps_malloc(msg_max, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!ws || !msg) {
++        free(ws);
++        free(msg);
++        return NULL;
++    }
++    ws->tag = tag;
++    ws->on_text = on_text;
++    ws->ctx = ctx;
++    ws->msg = msg;
++    ws->msg_max = msg_max;
++    return ws;
++}
++
++bool muse_ws_is_open(const muse_ws_t *ws)
++{
++    return ws->tls != NULL;
++}
++
++void muse_ws_close(muse_ws_t *ws)
++{
++    if (ws->tls) {
++        esp_tls_conn_destroy(ws->tls);
++        ws->tls = NULL;
++    }
++    ws->rx.pos = ws->rx.len = 0;
++    ws->f.st = F_HDR0;
++    ws->msg_len = 0;
++}
++
++static bool conn_write(muse_ws_t *ws, const uint8_t *data, size_t len)
++{
++    int64_t deadline = now_us() + IO_TIMEOUT_US;
++    while (len) {
++        ssize_t n = esp_tls_conn_write(ws->tls, data, len);
++        if (n > 0) {
++            data += n;
++            len -= n;
++        } else if (n == ESP_TLS_ERR_SSL_WANT_READ || n == ESP_TLS_ERR_SSL_WANT_WRITE) {
++            if (now_us() > deadline) {
++                return false;
++            }
++            vTaskDelay(1);
++        } else {
++            return false;
++        }
++    }
++    return true;
++}
++
++/* Next byte, waiting for it: 1 ok, 0 closed, -1 error or timeout. Only for the upgrade response. */
++static int rx_byte_wait(muse_ws_t *ws, uint8_t *c)
++{
++    if (ws->rx.pos < ws->rx.len) {
++        *c = ws->rx.buf[ws->rx.pos++];
++        return 1;
++    }
++    int64_t deadline = now_us() + IO_TIMEOUT_US;
++    for (;;) {
++        ssize_t n = esp_tls_conn_read(ws->tls, ws->rx.buf, sizeof(ws->rx.buf));
++        if (n > 0) {
++            ws->rx.pos = 0;
++            ws->rx.len = n;
++            *c = ws->rx.buf[ws->rx.pos++];
++            return 1;
++        }
++        if (n == 0) {
++            return 0;
++        }
++        if (n != ESP_TLS_ERR_SSL_WANT_READ && n != ESP_TLS_ERR_SSL_WANT_WRITE) {
++            return -1;
++        }
++        if (now_us() > deadline) {
++            return -1;
++        }
++        vTaskDelay(pdMS_TO_TICKS(5));
++    }
++}
++
++static bool rx_line(muse_ws_t *ws, char *out, size_t cap)
++{
++    size_t n = 0;
++    for (;;) {
++        uint8_t c;
++        if (rx_byte_wait(ws, &c) != 1) {
++            return false;
++        }
++        if (c == '\n') {
++            break;
++        }
++        if (c != '\r') {
++            if (n + 1 >= cap) {
++                return false;
++            }
++            out[n++] = (char)c;
++        }
++    }
++    out[n] = '\0';
++    return true;
++}
++
++/* One client frame: always FIN, always masked (RFC 6455 5.3), sent in pieces so nothing big is allocated. */
++static bool ws_send(muse_ws_t *ws, uint8_t op, const void *data, size_t len)
++{
++    uint8_t hdr[14];
++    size_t hl = 0;
++    hdr[hl++] = 0x80 | op;
++    if (len < 126) {
++        hdr[hl++] = 0x80 | (uint8_t)len;
++    } else if (len <= 0xffff) {
++        hdr[hl++] = 0x80 | 126;
++        hdr[hl++] = (uint8_t)(len >> 8);
++        hdr[hl++] = (uint8_t)len;
++    } else {
++        hdr[hl++] = 0x80 | 127;
++        for (int i = 7; i >= 0; i--) {
++            hdr[hl++] = (uint8_t)((uint64_t)len >> (8 * i));
++        }
++    }
++    uint8_t mask[4];
++    esp_fill_random(mask, sizeof(mask));
++    memcpy(hdr + hl, mask, 4);
++    hl += 4;
++    if (!conn_write(ws, hdr, hl)) {
++        return false;
++    }
++    const uint8_t *p = data;
++    uint8_t chunk[512];
++    for (size_t off = 0; off < len;) {
++        size_t n = len - off < sizeof(chunk) ? len - off : sizeof(chunk);
++        for (size_t i = 0; i < n; i++) {
++            chunk[i] = p[off + i] ^ mask[(off + i) & 3];
++        }
++        if (!conn_write(ws, chunk, n)) {
++            return false;
++        }
++        off += n;
++    }
++    return true;
++}
++
++bool muse_ws_send_text(muse_ws_t *ws, const char *text, size_t len)
++{
++    if (!ws->tls || !ws_send(ws, WS_TEXT, text, len)) {
++        ESP_LOGW(ws->tag, "sending failed");
++        muse_ws_close(ws);
++        return false;
++    }
++    return true;
++}
++
++static void on_frame(muse_ws_t *ws)
++{
++    switch (ws->f.op) {
++    case WS_PING:
++        ws_send(ws, WS_PONG, ws->f.ctl, ws->f.len < sizeof(ws->f.ctl) ? (size_t)ws->f.len : sizeof(ws->f.ctl));
++        return;
++    case WS_PONG:
++        return;
++    case WS_CLOSE: {
++        unsigned code = ws->f.len >= 2 ? (unsigned)(ws->f.ctl[0] << 8 | ws->f.ctl[1]) : 0;
++        int n = ws->f.len > 2 && ws->f.len <= sizeof(ws->f.ctl) ? (int)ws->f.len - 2 : 0;
++        ESP_LOGI(ws->tag, "the server closed the connection (%u%s%.*s)", code, n ? ": " : "", n, (const char *)ws->f.ctl + 2);
++        muse_ws_close(ws);
++        return;
++    }
++    case WS_TEXT:
++    case WS_BINARY:
++        ws->f.msg_op = ws->f.op;
++        break;
++    case WS_CONT:
++        break;
++    default:
++        return;
++    }
++    if (!ws->f.fin) {
++        return;
++    }
++    if (ws->f.overflow) {
++        ESP_LOGW(ws->tag, "message over %u bytes dropped", (unsigned)ws->msg_max);
++    } else if (ws->f.msg_op == WS_TEXT) {
++        ws->msg[ws->msg_len] = '\0';
++        ws->on_text(ws->msg, ws->msg_len, ws->ctx);
++    }
++    ws->msg_len = 0;
++    ws->f.overflow = false;
++}
++
++static void payload_byte(muse_ws_t *ws, uint8_t c)
++{
++    if (ws->f.masked) {
++        c ^= ws->f.mask[ws->f.got & 3];
++    }
++    if (ws->f.op >= WS_CLOSE) {
++        if (ws->f.got < sizeof(ws->f.ctl)) {
++            ws->f.ctl[ws->f.got] = c;
++        }
++    } else if (ws->msg_len < ws->msg_max - 1) {
++        ws->msg[ws->msg_len++] = (char)c;
++    } else {
++        ws->f.overflow = true;
++    }
++    ws->f.got++;
++}
++
++/* Feeds received bytes through the frame parser; whole frames are handled as they complete. */
++static void feed(muse_ws_t *ws, const uint8_t *buf, size_t n)
++{
++    for (size_t i = 0; i < n && ws->tls; i++) {
++        uint8_t c = buf[i];
++        switch (ws->f.st) {
++        case F_HDR0:
++            ws->f.fin = c & 0x80;
++            ws->f.op = c & 0x0f;
++            ws->f.st = F_HDR1;
++            break;
++        case F_HDR1:
++            ws->f.masked = c & 0x80;
++            ws->f.len = c & 0x7f;
++            ws->f.got = 0;
++            ws->f.mask_got = 0;
++            if (ws->f.len >= 126) {
++                ws->f.ext_need = ws->f.len == 126 ? 2 : 8;
++                ws->f.ext_got = 0;
++                ws->f.len = 0;
++                ws->f.st = F_EXTLEN;
++            } else {
++                ws->f.st = ws->f.masked ? F_MASK : F_PAYLOAD;
++            }
++            break;
++        case F_EXTLEN:
++            ws->f.len = ws->f.len << 8 | c;
++            if (++ws->f.ext_got == ws->f.ext_need) {
++                ws->f.st = ws->f.masked ? F_MASK : F_PAYLOAD;
++            }
++            break;
++        case F_MASK:
++            ws->f.mask[ws->f.mask_got++] = c;
++            if (ws->f.mask_got == 4) {
++                ws->f.st = F_PAYLOAD;
++            }
++            break;
++        case F_PAYLOAD:
++            payload_byte(ws, c);
++            break;
++        }
++        if (ws->f.st == F_PAYLOAD && ws->f.got == ws->f.len) {
++            ws->f.st = F_HDR0;
++            on_frame(ws);
++        }
++    }
++}
++
++int muse_ws_poll(muse_ws_t *ws)
++{
++    if (!ws->tls) {
++        return -1;
++    }
++    ssize_t n = esp_tls_conn_read(ws->tls, ws->rx.buf, sizeof(ws->rx.buf));
++    if (n > 0) {
++        feed(ws, ws->rx.buf, n);
++        return ws->tls ? (int)n : -1;
++    }
++    if (n == ESP_TLS_ERR_SSL_WANT_READ || n == ESP_TLS_ERR_SSL_WANT_WRITE) {
++        return 0;
++    }
++    ESP_LOGW(ws->tag, "the connection dropped");
++    muse_ws_close(ws);
++    return -1;
++}
++
++/*
++ * Opens the TLS connection and upgrades it to a WebSocket. A refused upgrade
++ * (bad key, quota) comes back as an ordinary HTTP response, whose body says
++ * why. The server's Sec-WebSocket-Accept isn't checked: TLS already says who
++ * answered.
++ */
++bool muse_ws_open(muse_ws_t *ws, const char *host, const char *path, const char *key, int *status)
++{
++    muse_ws_close(ws);
++    *status = 0;
++    int64_t t0 = now_us();
++    ws->tls = esp_tls_init();
++    if (!ws->tls) {
++        return false;
++    }
++    esp_tls_cfg_t cfg = {
++        .crt_bundle_attach = esp_crt_bundle_attach,
++        .timeout_ms = CONNECT_TIMEOUT_MS,
++#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
++        .client_session = ws->ticket,
++#endif
++    };
++    if (esp_tls_conn_new_sync(host, strlen(host), 443, &cfg, ws->tls) != 1) {
++        ESP_LOGW(ws->tag, "can't reach %s", host);
++#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
++        if (ws->ticket) {
++            /* The ticket may be what was refused: the next try starts afresh. */
++            esp_tls_free_client_session(ws->ticket);
++            ws->ticket = NULL;
++        }
++#endif
++        muse_ws_close(ws);
++        return false;
++    }
++    bool resumed = ws->ticket != NULL;
++#if CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS
++    if (ws->ticket) {
++        esp_tls_free_client_session(ws->ticket);
++    }
++    ws->ticket = esp_tls_get_client_session(ws->tls);
++#endif
++    int fd;
++    if (esp_tls_get_conn_sockfd(ws->tls, &fd) == ESP_OK) {
++        lwip_fcntl(fd, F_SETFL, lwip_fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
++    }
++
++    uint8_t nonce[16];
++    esp_fill_random(nonce, sizeof(nonce));
++    unsigned char ws_key[32];
++    size_t ws_key_len = 0;
++    mbedtls_base64_encode(ws_key, sizeof(ws_key), &ws_key_len, nonce, sizeof(nonce));
++    ws_key[ws_key_len] = '\0';
++    char head[HEAD_MAX];
++    int hl = snprintf(head, sizeof(head),
++                      "GET %s HTTP/1.1\r\n"
++                      "Host: %s\r\n"
++                      "Upgrade: websocket\r\n"
++                      "Connection: Upgrade\r\n"
++                      "Sec-WebSocket-Key: %s\r\n"
++                      "Sec-WebSocket-Version: 13\r\n"
++                      "Authorization: Bearer %s\r\n\r\n",
++                      path, host, (const char *)ws_key, key);
++    bool sent = hl > 0 && hl < (int)sizeof(head) && conn_write(ws, (const uint8_t *)head, hl);
++    memset(head, 0, sizeof(head));   /* it held the key */
++    char line[HDR_LINE_MAX];
++    if (!sent || !rx_line(ws, line, sizeof(line)) || sscanf(line, "HTTP/%*s %d", status) != 1) {
++        ESP_LOGW(ws->tag, "no WebSocket upgrade from %s", host);
++        muse_ws_close(ws);
++        return false;
++    }
++    long length = 0;
++    for (;;) {
++        if (!rx_line(ws, line, sizeof(line))) {
++            muse_ws_close(ws);
++            return false;
++        }
++        if (!line[0]) {
++            break;
++        }
++        if (!strncasecmp(line, "content-length:", 15)) {
++            length = strtol(line + 15, NULL, 10);
++        }
++    }
++    if (*status != 101) {
++        /* The error body says why (bad key, quota); it never holds the key. */
++        char err[ERR_MAX];
++        size_t n = 0;
++        uint8_t c;
++        for (long i = 0; i < length && n < sizeof(err) - 1 && rx_byte_wait(ws, &c) == 1; i++) {
++            err[n++] = (char)c;
++        }
++        err[n] = '\0';
++        ESP_LOGW(ws->tag, "HTTP %d: %.300s", *status, err);
++        muse_ws_close(ws);
++        return false;
++    }
++    ws->f.st = F_HDR0;
++    ws->msg_len = 0;
++    ESP_LOGI(ws->tag, "connected in %d ms%s", (int)((now_us() - t0) / 1000), resumed ? " (resumed session)" : "");
++    /* Frames that came in the same read as the upgrade response. */
++    size_t left = ws->rx.len - ws->rx.pos;
++    size_t from = ws->rx.pos;
++    ws->rx.pos = ws->rx.len = 0;
++    if (left) {
++        feed(ws, ws->rx.buf + from, left);
++    }
++    return ws->tls != NULL;
++}
+diff --git a/esp32/components/muse/muse_ws.h b/esp32/components/muse/muse_ws.h
+new file mode 100644
+index 0000000..3ffd294
+--- /dev/null
++++ b/esp32/components/muse/muse_ws.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++
++/*
++ * A WebSocket client over TLS for one task: it connects with a Bearer key,
++ * sends text frames, and hands whole text messages to a callback as they
++ * arrive. Reads never block: the owning task polls. The same protocol code as
++ * muse_xai_tts.c's own client, for connections that live longer than a reply.
++ */
++
++typedef struct muse_ws muse_ws_t;
++
++/* A whole text message, NUL-terminated; the buffer may be changed but not kept. */
++typedef void (*muse_ws_on_text_t)(char *msg, size_t len, void *ctx);
++
++/* Its buffers go in PSRAM. `tag` names it in the log; messages over `msg_max` are dropped. */
++muse_ws_t *muse_ws_new(const char *tag, size_t msg_max, muse_ws_on_text_t on_text, void *ctx);
++
++/*
++ * Connects to wss://host/path with "Authorization: Bearer key", resuming the
++ * last TLS session when it can. False if it couldn't; *status is the HTTP
++ * status of a refused upgrade (0 if it never got that far), whose body is logged.
++ */
++bool muse_ws_open(muse_ws_t *ws, const char *host, const char *path, const char *key, int *status);
++
++bool muse_ws_is_open(const muse_ws_t *ws);
++
++/* One text frame. False (and closed) if it couldn't be sent. */
++bool muse_ws_send_text(muse_ws_t *ws, const char *text, size_t len);
++
++/* Reads what has arrived, once (up to 4 KB), without waiting, and handles
++ * whole messages. Returns the bytes read, or -1 if the connection has closed
++ * or dropped. */
++int muse_ws_poll(muse_ws_t *ws);
++
++void muse_ws_close(muse_ws_t *ws);
 diff --git a/esp32/components/muse/muse_xai_tts.c b/esp32/components/muse/muse_xai_tts.c
 new file mode 100644
-index 0000000..f5c148c
+index 0000000..eef72fb
 --- /dev/null
 +++ b/esp32/components/muse/muse_xai_tts.c
-@@ -0,0 +1,903 @@
+@@ -0,0 +1,922 @@
 +#include "muse_xai_tts.h"
 +
 +#include <math.h>
@@ -5194,7 +7320,7 @@ index 0000000..f5c148c
 +static QueueHandle_t s_queue;
 +static TaskHandle_t s_task;
 +
-+typedef enum { JOB_WARM, JOB_SAY, JOB_END } job_type_t;
++typedef enum { JOB_WARM, JOB_SAY, JOB_END, JOB_CLOSE } job_type_t;
 +
 +typedef struct {
 +    job_type_t type;
@@ -5938,6 +8064,10 @@ index 0000000..f5c148c
 +                    end_reply(job.gen);
 +                }
 +                break;
++            case JOB_CLOSE:
++                conn_close();
++                finish("closed");
++                break;
 +            }
 +        }
 +
@@ -6029,12 +8159,27 @@ index 0000000..f5c148c
 +    atomic_fetch_add(&s_gen, 1);
 +    atomic_store(&s_state, MUSE_GEMINI_TTS_IDLE);
 +}
++
++void muse_xai_tts_close(void)
++{
++    muse_xai_tts_cancel();
++    if (s_task) {
++        job_t job = { .type = JOB_CLOSE, .gen = atomic_load(&s_gen) };
++        xQueueSend(s_queue, &job, 0);
++    }
++}
++
++bool muse_xai_tts_key(char *out, size_t cap)
++{
++    load_key();
++    return s_key[0] && strlcpy(out, s_key, cap) < cap;
++}
 diff --git a/esp32/components/muse/muse_xai_tts.h b/esp32/components/muse/muse_xai_tts.h
 new file mode 100644
-index 0000000..61f281b
+index 0000000..73ad0a6
 --- /dev/null
 +++ b/esp32/components/muse/muse_xai_tts.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,60 @@
 +#pragma once
 +
 +#include <stdbool.h>
@@ -6085,6 +8230,12 @@ index 0000000..61f281b
 +
 +/* Drops the reply: queued sentences are skipped and the audio still coming is cut off. */
 +void muse_xai_tts_cancel(void);
++
++/* Drops any reply and closes the kept connection (a live conversation is starting). */
++void muse_xai_tts_close(void);
++
++/* The stored key, for muse_live.c: false if there's none. Never log it. */
++bool muse_xai_tts_key(char *out, size_t cap);
 +
 +#ifdef __cplusplus
 +}
@@ -6337,6 +8488,156 @@ index e9ced5a..1f0a2b0 100644
                  str(ROOT / "tests" / "muse_serial_chat_harness.c"),
                  str(ROOT / "components" / "muse" / "muse_chat_text.c"),
                  str(ROOT / "components" / "muse" / "muse_text.c"),
+diff --git a/esp32/tests/test_muse_echo.py b/esp32/tests/test_muse_echo.py
+new file mode 100644
+index 0000000..f752369
+--- /dev/null
++++ b/esp32/tests/test_muse_echo.py
+@@ -0,0 +1,144 @@
++"""muse_echo.c, a voice over the speaker's own sound, fed levels as the live conversation would (one pair per 20 ms chunk)."""
++import os
++from pathlib import Path
++import shlex
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++MUSE = ROOT / 'components/muse'
++
++HARNESS = r'''
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "muse_echo.h"
++
++#define LAG 3   /* the board's echo comes back 60 ms late */
++
++static float spk_hist[LAG + 1];
++static unsigned seed = 1;
++
++/* -1..1, the same every run. */
++static float jitter(void)
++{
++    seed = seed * 1103515245u + 12345u;
++    return ((seed >> 16) & 0x7fff) / 16384.0f - 1.0f;
++}
++
++/* Speech from the speaker: syllables between -20 and -36 dBFS, the odd gap. */
++static float speech(size_t i)
++{
++    static const float LEVELS[] = { -20, -24, -30, -22, -36, -26, -21, -33, -28, -100 };
++    return LEVELS[i % 10];
++}
++
++/* What the mic hears: the speaker `coupling` dB down (and late, and uneven),
++ * a voice at `voice` dBFS if there is one, and the room. Loudest wins. */
++static float mic(float spk, float coupling, float voice)
++{
++    for (int i = LAG; i > 0; i--) spk_hist[i] = spk_hist[i - 1];
++    spk_hist[0] = spk;
++    float echo = spk_hist[LAG] > -90 ? spk_hist[LAG] + coupling + 3 * jitter() : -100;
++    float db = -58 + jitter();
++    db = echo > db ? echo : db;
++    return voice > db ? voice + jitter() : db;
++}
++
++/* Plays `n` chunks; returns the chunk (counted from 1) where it heard a barge-in, or 0. */
++static size_t play(muse_echo_t *e, size_t n, size_t from, float coupling, float voice)
++{
++    for (size_t i = 0; i < n; i++) {
++        float s = speech(from + i);
++        if (muse_echo_feed(e, s, mic(s, coupling, voice))) return i + 1;
++    }
++    return 0;
++}
++
++int main(int argc, char **argv)
++{
++    assert(argc == 2);
++    for (int i = 0; i <= LAG; i++) spk_hist[i] = -100;
++    muse_echo_t e;
++    muse_echo_init(&e);
++    switch (atoi(argv[1])) {
++    case 0:   /* 20 s of the speaker alone: never a barge-in */
++        assert(play(&e, 1000, 0, -8, -100) == 0);
++        assert(e.coupling_db < -6 && e.coupling_db > -16);   /* under -8: it's against the loudest of the lag */
++        break;
++    case 1: {   /* a voice over a reply, after it has learnt: heard within 120 ms */
++        assert(play(&e, 150, 0, -8, -100) == 0);
++        size_t at = play(&e, 50, 150, -8, -14);
++        assert(at >= MUSE_ECHO_ONSET_CHUNKS && at <= MUSE_ECHO_ONSET_CHUNKS + 2);
++        break;
++    }
++    case 2:   /* a loud speaker, right from the first chunk: the start guess keeps it from barging in */
++        assert(play(&e, 500, 0, 2, -100) == 0);
++        break;
++    case 3: {   /* playback over: a voice in the quiet room is heard; the room alone isn't */
++        assert(play(&e, 150, 0, -8, -100) == 0);
++        for (int i = 0; i < 50; i++) assert(!muse_echo_feed(&e, -100, mic(-100, -8, -100)));
++        int heard = 0;
++        for (int i = 0; i < 10 && !heard; i++) heard = muse_echo_feed(&e, -100, mic(-100, -8, -32));
++        assert(heard);
++        break;
++    }
++    case 4:   /* a voice no louder than the echo can't be told from it */
++        assert(play(&e, 150, 0, -8, -100) == 0);
++        assert(play(&e, 100, 150, -8, -32) == 0);
++        break;
++    case 6:   /* the speaker 12 dB louder in the mic than it's sent (the StopWatch): learnt, never a barge-in */
++        assert(play(&e, 1500, 0, 12, -100) == 0);
++        break;
++    case 7: {   /* a second reply starts afresh but keeps what it learnt: still no barge-in from echo */
++        assert(play(&e, 300, 0, 12, -100) == 0);
++        muse_echo_reset(&e);
++        assert(play(&e, 300, 0, 12, -100) == 0);
++        break;
++    }
++    case 5: {   /* talking for a while without a barge-in (too soft) doesn't teach it the voice is echo */
++        assert(play(&e, 150, 0, -8, -100) == 0);
++        float before = e.coupling_db;
++        play(&e, 100, 150, -8, -30);
++        assert(e.coupling_db - before < 6);
++        assert(play(&e, 50, 250, -8, -14) != 0);
++        break;
++    }
++    }
++    return 0;
++}
++'''
++
++
++class MuseEcho(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cc = shlex.split(os.environ.get('CC', 'cc'))
++        if not shutil.which(cc[0]):
++            raise unittest.SkipTest('C compiler unavailable')
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.tmp.cleanup)
++        src = Path(cls.tmp.name) / 'echo_test.c'
++        src.write_text(HARNESS)
++        cls.binary = Path(cls.tmp.name) / 'echo_test'
++        subprocess.run([*cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(MUSE),
++                        str(src), str(MUSE / 'muse_echo.c'), '-o', str(cls.binary)], check=True)
++
++    def run_case(self, case):
++        ran = subprocess.run([str(self.binary), str(case)], capture_output=True, text=True)
++        self.assertEqual(ran.returncode, 0, ran.stderr)
++
++    def test_the_speaker_alone_is_never_a_barge_in(self): self.run_case(0)
++    def test_a_voice_over_a_reply_is_heard_quickly(self): self.run_case(1)
++    def test_a_loud_speaker_from_the_start_is_not_a_barge_in(self): self.run_case(2)
++    def test_after_playback_a_voice_is_heard_and_the_room_is_not(self): self.run_case(3)
++    def test_a_voice_as_soft_as_the_echo_is_not_heard(self): self.run_case(4)
++    def test_a_soft_voice_does_not_teach_it_echo(self): self.run_case(5)
++    def test_a_speaker_louder_in_the_mic_than_sent_is_learnt(self): self.run_case(6)
++    def test_the_next_reply_keeps_what_it_learnt(self): self.run_case(7)
++
++
++if __name__ == '__main__':
++    unittest.main()
 diff --git a/esp32/tests/test_muse_serial_chat.py b/esp32/tests/test_muse_serial_chat.py
 index 474a187..0ae066c 100644
 --- a/esp32/tests/test_muse_serial_chat.py

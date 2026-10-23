@@ -142,6 +142,13 @@ stamp_build() {
         cp "$REPO_ROOT/avatar/tape.rgb565a8" "$tape_dir/tape.rgb565a8"
         warn "couldn't redraw the tape (needs uv and the Permanent Marker font): build ${BUILD_ID} is in the log and settings only"
     fi
+    # Grok's and Muse's logos, by the battery ring in a live conversation (avatar/make_icons.py).
+    local logo
+    for logo in grok muse; do
+        if [ -f "$REPO_ROOT/avatar/icons/$logo.rgb565a8" ]; then
+            cp "$REPO_ROOT/avatar/icons/$logo.rgb565a8" "$tape_dir/"
+        fi
+    done
 }
 
 # --- ESP-IDF v6.0.1 -----------------------------------------------------------
