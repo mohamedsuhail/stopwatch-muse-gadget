@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MOBOT live voice · xAI + Muse</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <section class="device">
+    <div class="watch">
+      <div class="screen" id="screen" data-state="off">
+        <video id="clipA" muted playsinline preload="auto"></video>
+        <video id="clipB" muted playsinline preload="auto"></video>
+        <img class="tape" src="/avatar/tape.png" alt="">
+        <div class="ring" id="ring"></div>
+        <div class="caption" id="caption">Press Connect</div>
+      </div>
+    </div>
+    <div class="state" id="stateLabel">Off</div>
+    <button id="talk" class="talk" disabled>Hold to talk</button>
+    <div class="hint">or hold <kbd>Space</kbd></div>
+    <div class="links">
+      <button id="connect" class="primary">Connect</button>
+      <span class="pill" id="xaiPill">xAI · off</span>
+      <span class="pill" id="musePill">Muse · mock</span>
+    </div>
+    <div class="meter"><div id="level"></div></div>
+  </section>
+
+  <section class="panels">
+    <nav>
+      <button data-tab="talk" class="on">Conversation</button>
+      <button data-tab="time">Timings</button>
+      <button data-tab="setup">Setup</button>
+      <button data-tab="events">Events</button>
+    </nav>
+
+    <div class="tab on" id="tab-talk">
+      <div id="log" class="log"></div>
+    </div>
+
+    <div class="tab" id="tab-time">
+      <p class="note">Times are from letting go of the talk button.</p>
+      <table class="times">
+        <thead><tr><th>Turn</th><th>First sound</th><th>ask_muse</th><th>Muse answered</th><th>Answer audible</th></tr></thead>
+        <tbody id="times"></tbody>
+      </table>
+    </div>
+
+    <div class="tab" id="tab-setup">
+      <fieldset>
+        <legend>Muse</legend>
+        <label><input type="radio" name="museKind" value="mock" checked> Mock Muse (the notes below)</label>
+        <label><input type="radio" name="museKind" value="serial"> The real Muse, through the watch on USB</label>
+        <button id="serialConnect">Connect the watch…</button>
+        <label><input type="checkbox" id="mirror"> Mirror the avatar's state on the watch (<code>&gt;face=</code>)</label>
+        <p class="note">Web Serial needs Chrome or Edge. Opening the port restarts the watch; give it a few
+          seconds to rejoin Wi-Fi. Pressing the watch's own talk button ends a typed turn.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>While Muse thinks</legend>
+        <label><input type="radio" name="wait" value="block" checked> Wait quietly (thinking clip), then answer</label>
+        <label><input type="radio" name="wait" value="async"> Acknowledge at once, keep talking, answer when it's quiet</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>How Muse's answer is said</legend>
+        <label><input type="radio" name="speak" value="verbatim" checked> Word for word, in Grok's voice (<code>force_message</code>)</label>
+        <label><input type="radio" name="speak" value="rephrase"> Grok retells it in its own words</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>What goes to Muse</legend>
+        <label><input type="radio" name="routing" value="personal" checked> Anything personal; Grok handles small talk</label>
+        <label><input type="radio" name="routing" value="always"> Everything except greetings and "stop"</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Voice</legend>
+        <label>Voice <select id="voice"><option>iris</option><option>eve</option></select></label>
+        <label><input type="checkbox" id="handsFree"> Hands-free (xAI's voice detection; use headphones)</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Style note sent with each question to Muse</legend>
+        <textarea id="style" rows="3"></textarea>
+      </fieldset>
+
+      <fieldset>
+        <legend>Mock Muse's notes (one per line)</legend>
+        <textarea id="notes" rows="7"></textarea>
+      </fieldset>
+      <button id="reset">Reset to defaults</button>
+    </div>
+
+    <div class="tab" id="tab-events">
+      <label><input type="checkbox" id="allEvents"> Show every event (audio deltas aside)</label>
+      <pre id="events" class="events"></pre>
+    </div>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
