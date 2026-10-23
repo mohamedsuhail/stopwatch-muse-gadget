@@ -145,7 +145,7 @@ class FakeAudio {
     }
 }
 
-function rig(over = {}) {
+function rig(over = {}, opts = {}) {
     const rt = new FakeRt();
     const audio = new FakeAudio();
     const s = { wait: 'block', speak: 'verbatim', routing: 'personal', voice: 'iris', handsFree: false, style: 'STYLE', mirror: false, ...over };
@@ -157,8 +157,12 @@ function rig(over = {}) {
         return realAsk(text, ...rest);
     };
     const states = [];
-    const orch = new Orchestrator({ rt, audio, muse, settings: () => s, on: { state: (st) => states.push(st) } });
-    return { rt, audio, orch, asked, states, s };
+    const convo = [];
+    const orch = new Orchestrator({
+        rt, audio, muse, settings: () => s, quietMs: opts.quietMs,
+        on: { state: (st) => states.push(st), conversation: (on, why) => convo.push(on ? 'start' : 'end:' + why) },
+    });
+    return { rt, audio, orch, asked, states, s, convo };
 }
 
 /* A spoken turn: press, enough audio, release. */
@@ -314,4 +318,57 @@ test('a function call only listed in response.done is still run', async () => {
     );
     await sleep(450);
     assert.equal(asked.length, 1);
+});
+
+/* ---- conversations: long press to start, click or quiet to end ---- */
+
+test('a conversation turns voice detection and the mic on, and a click turns them off', () => {
+    const { rt, audio, orch, convo } = rig();
+    orch.configure();
+    orch.startConversation();
+    const on = rt.sent.filter((e) => e.type === 'session.update').at(-1);
+    assert.deepEqual(on.session.turn_detection, { type: 'server_vad' });
+    assert.equal(audio.micOn, true);
+    assert.equal(orch.state(), 'listening');   /* waiting for you */
+    orch.endConversation('click');
+    const off = rt.sent.filter((e) => e.type === 'session.update').at(-1);
+    assert.deepEqual(off.session.turn_detection, { type: null });
+    assert.equal(audio.micOn, false);
+    assert.equal(orch.state(), 'idle');
+    assert.deepEqual(convo, ['start', 'end:click']);
+});
+
+test('a conversation ends by itself after a quiet moment, not while Muse is working', async () => {
+    const { rt, audio, orch, asked, convo } = rig({}, { quietMs: 200 });
+    orch.startConversation();
+    /* You speak, then Grok asks Muse: neither is quiet, however long it takes. */
+    rt.emit({ type: 'input_audio_buffer.speech_started' });
+    await sleep(300);
+    assert.deepEqual(convo, ['start'], 'not while you talk');
+    rt.emit(
+        { type: 'input_audio_buffer.speech_stopped' },
+        { type: 'response.created', response: { id: 'r1' } },
+        { type: 'response.function_call_arguments.done', call_id: 'c1', name: 'ask_muse', arguments: '{"question":"next task?"}' },
+        { type: 'response.done', response: { id: 'r1', status: 'completed' } },
+    );
+    await sleep(450);   /* Muse answers, and its answer goes to Grok */
+    assert.equal(asked.length, 1);
+    rt.emit({ type: 'response.created', response: { id: 'r2' } }, audioDelta('r2'),
+        { type: 'response.done', response: { id: 'r2', status: 'completed' } });
+    assert.equal(audio.speaking, true);
+    await sleep(300);
+    assert.deepEqual(convo, ['start'], 'not while the answer plays');
+    audio.finish();   /* the answer has been said: now it's quiet */
+    await sleep(100);
+    assert.deepEqual(convo, ['start'], 'not before the quiet time');
+    await sleep(200);
+    assert.deepEqual(convo, ['start', 'end:quiet']);
+    assert.equal(orch.conversing, false);
+});
+
+test('push-to-talk is unchanged when no conversation is on', () => {
+    const { rt, orch } = rig();
+    talk(rt, orch);
+    assert.ok(rt.types().includes('input_audio_buffer.commit'));
+    assert.equal(orch.conversing, false);
 });

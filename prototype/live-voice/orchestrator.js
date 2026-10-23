@@ -21,6 +21,7 @@ import { b64decode, b64encode, RATE } from './audio.js';
 import { speakable } from './speakable.js';
 
 const MIN_TALK_FRAMES = RATE / 4;   /* a press shorter than 0.25 s is a slip, as on the watch */
+export const CONVERSATION_QUIET_MS = 8000;   /* a conversation ends after this long with nothing going on */
 
 export const DEFAULT_STYLE =
     'This message is from my StopWatch, whose voice assistant reads your reply aloud on a small speaker. ' +
@@ -106,8 +107,9 @@ const QUIET = new Set([
 ]);
 
 export class Orchestrator {
-    constructor({ rt, audio, muse, settings, on = {} }) {
+    constructor({ rt, audio, muse, settings, on = {}, quietMs = CONVERSATION_QUIET_MS }) {
         this.rt = rt;
+        this.quietMs = quietMs;
         this.audio = audio;
         this.muse = muse;
         this.settings = settings;
@@ -116,6 +118,8 @@ export class Orchestrator {
         }, on);
 
         this.talking = false;      /* push-to-talk held (or, hands-free, the server heard speech) */
+        this.conversing = false;   /* a conversation started with a long press: hands-free until it ends */
+        this.quietTimer = null;    /* ends the conversation after CONVERSATION_QUIET_MS of quiet */
         this.talkFrames = 0;
         this.response = null;      /* the response in progress: {id, calls, audio, cancelled} */
         this.awaiting = false;     /* asked for a response, none started yet */
@@ -146,7 +150,7 @@ export class Orchestrator {
             session: {
                 voice: s.voice,
                 instructions: instructions(s),
-                turn_detection: s.handsFree ? { type: 'server_vad' } : { type: null },
+                turn_detection: this.handsFree() ? { type: 'server_vad' } : { type: null },
                 audio: {
                     input: { format: { type: 'audio/pcm', rate: RATE } },
                     output: { format: { type: 'audio/pcm', rate: RATE } },
@@ -154,8 +158,71 @@ export class Orchestrator {
                 tools: tools(),
             },
         });
-        this.audio.mic(!!s.handsFree);
+        this.audio.mic(this.handsFree());
         this.refresh();
+    }
+
+    /* Hands-free: the setting, or for the length of a conversation. */
+    handsFree() {
+        return !!this.settings().handsFree || this.conversing;
+    }
+
+    /* ---- conversations: long press to start, click (or quiet) to end ----
+     *
+     * The watch will do the same with its blue button: a long press opens a
+     * hands-free conversation, turn after turn by xAI's voice detection, and it
+     * closes itself once nobody has spoken, nothing is playing and nothing is
+     * waiting on Muse for CONVERSATION_QUIET_MS, or at once on a click. */
+
+    startConversation() {
+        if (this.conversing || !this.rt.open) {
+            return;
+        }
+        this.bargeIn();
+        this.conversing = true;
+        this.talking = false;
+        this.turn = null;
+        this.rt.send({ type: 'input_audio_buffer.clear' });
+        this.configure();   /* server VAD on, mic on */
+        this.on.conversation && this.on.conversation(true);
+        this.refresh();
+    }
+
+    endConversation(why = 'click') {
+        if (!this.conversing) {
+            return;
+        }
+        this.conversing = false;
+        clearTimeout(this.quietTimer);
+        this.quietTimer = null;
+        if (why === 'click') {
+            this.bargeIn();   /* a click also stops whatever is playing */
+        }
+        this.talking = false;
+        if (this.rt.open) {
+            this.rt.send({ type: 'input_audio_buffer.clear' });
+            this.configure();   /* back to push-to-talk (or the hands-free setting) */
+        }
+        this.on.conversation && this.on.conversation(false, why);
+        this.refresh();
+    }
+
+    /* Restarts the quiet countdown whenever something is going on. */
+    watchQuiet() {
+        if (!this.conversing) {
+            return;
+        }
+        const busy = this.talking || this.audio.speaking || this.awaiting || this.response
+            || this.asks.size || this.deliveries.length;
+        if (busy) {
+            clearTimeout(this.quietTimer);
+            this.quietTimer = null;
+        } else if (!this.quietTimer) {
+            this.quietTimer = setTimeout(() => {
+                this.quietTimer = null;
+                this.endConversation('quiet');
+            }, this.quietMs);
+        }
     }
 
     /* ---- the talk button ---- */
@@ -178,7 +245,7 @@ export class Orchestrator {
             return;
         }
         this.talking = false;
-        if (this.settings().handsFree) {
+        if (this.handsFree()) {
             return;
         }
         this.audio.mic(false);
@@ -202,7 +269,7 @@ export class Orchestrator {
 
     mic(pcm, peak) {
         this.on.level && this.on.level(peak);
-        if (!this.talking && !this.settings().handsFree) {
+        if (!this.talking && !this.handsFree()) {
             return;
         }
         this.talkFrames += pcm.length;
@@ -281,7 +348,7 @@ export class Orchestrator {
             this.on.mark('session', 'xAI session configured');
             break;
         case 'input_audio_buffer.speech_started':   /* hands-free: the server heard you */
-            if (this.settings().handsFree) {
+            if (this.handsFree()) {
                 this.bargeIn();
                 this.talking = true;
                 this.turn = null;
@@ -289,7 +356,7 @@ export class Orchestrator {
             }
             break;
         case 'input_audio_buffer.speech_stopped':
-            if (this.settings().handsFree) {
+            if (this.handsFree()) {
                 this.talking = false;
                 this.startTurn();
                 this.awaiting = true;   /* server VAD makes the response itself */
@@ -504,10 +571,11 @@ export class Orchestrator {
         if (this.audio.speaking) return 'speaking';
         if (this.awaiting || this.response) return 'thinking';
         if (this.asks.size) return 'muse';
-        return 'idle';
+        return this.conversing ? 'listening' : 'idle';   /* in a conversation, it's waiting for you */
     }
 
     refresh() {
+        this.watchQuiet();
         const st = this.state();
         if (st !== this.lastState) {
             this.lastState = st;

@@ -20,8 +20,8 @@
       </div>
     </div>
     <div class="state" id="stateLabel">Off</div>
-    <button id="talk" class="talk" disabled>Hold to talk</button>
-    <div class="hint">or hold <kbd>Space</kbd></div>
+    <button id="talk" class="talk" disabled>Hold to start</button>
+    <div class="hint">or <kbd>Space</kbd></div>
     <div class="links">
       <button id="connect" class="primary">Connect</button>
       <span class="pill" id="xaiPill">xAI · off</span>
@@ -59,6 +59,12 @@
         <label><input type="checkbox" id="mirror"> Mirror the avatar's state on the watch (<code>&gt;face=</code>)</label>
         <p class="note">Web Serial needs Chrome or Edge. Opening the port restarts the watch; give it a few
           seconds to rejoin Wi-Fi. Pressing the watch's own talk button ends a typed turn.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Talk button (and Space)</legend>
+        <label><input type="radio" name="button" value="conversation" checked> Long press starts a conversation; it ends by itself after a quiet moment, or click to end (the watch's blue button, next)</label>
+        <label><input type="radio" name="button" value="push"> Hold to talk, let go to send</label>
       </fieldset>
 
       <fieldset>

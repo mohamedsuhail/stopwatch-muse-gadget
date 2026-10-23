@@ -37,7 +37,10 @@ XAI_API_KEY=xai-... python3 prototype/live-voice/server.py
 ```
 
 1. **Connect.** Allow the microphone. The astronaut wakes.
-2. **Hold the button, or Space,** and talk. Let go to send.
+2. **Long-press the button, or Space** (half a second), and talk. That opens a conversation: xAI's
+   voice detection ends each turn when you stop, so keep going turn after turn. It closes by itself
+   once nothing has happened for 8 s (nobody talking, nothing playing, nothing waiting on Muse), or
+   **click** to end it at once. Setup has the old **hold to talk** mode too.
 3. Try small talk ("how are you?"), then something only Muse knows ("what's my next task on the StopWatch?").
 
 It starts with a **mock Muse**, which answers from the notes in Setup after 2 to 6 s. To use the
@@ -52,6 +55,7 @@ and server bind to localhost.
 
 | Setting | Options | What it tests |
 | --- | --- | --- |
+| Talk button | **Long press** (default): a conversation, ended by a click or 8 s of quiet<br>**Hold to talk**: one turn per press | the conversation flow planned for the watch's blue button |
 | While Muse thinks | **Wait quietly** (default): thinking clip until Muse answers<br>**Acknowledge**: Grok says "let me ask Muse" and you can keep talking; the answer comes when it's quiet | whether filler helps or, like the thinking phrases, breaks the flow |
 | How Muse's answer is said | **Word for word** (default): Muse's text, cleaned like `speakable()`, in Grok's voice with `force_message`; no model in between<br>**Grok retells it**: Grok gets it as the tool result | fidelity against naturalness |
 | What goes to Muse | **Anything personal** (default): projects, tasks and to-dos, calendar, shopping, notes, reminders, asking or doing<br>**Everything** except greetings and "stop" | whether Grok's routing misses personal questions |
@@ -60,6 +64,22 @@ and server bind to localhost.
 
 **Timings** lists every turn, measured from letting go of the button: first sound, when Grok called
 `ask_muse`, when Muse answered, and when the answer became audible. **Events** shows the raw xAI events.
+
+## The conversation, for the watch
+
+The talk button follows the plan for the watch's blue button, so it can move to the firmware as is
+(`orchestrator.js`: `startConversation`, `endConversation`, `watchQuiet`; `app.js`: the gestures):
+
+```
+ IDLE ──long press (0.5 s)──► CONVERSATION ──click──────────────────► IDLE
+                              listening ⇄ thinking ⇄ Muse ⇄ speaking
+                              └─ 8 s with none of these ─────────────► IDLE
+```
+
+- A click while Grok is talking also stops it, so ending is always instant.
+- During a conversation the avatar shows listening whenever it's waiting for you.
+- `CONVERSATION_QUIET_MS` (8 s) and `LONG_PRESS_MS` (0.5 s) are the two numbers to tune; the
+  firmware already uses 0.3 s for its hold-to-wake.
 
 ## Tests
 

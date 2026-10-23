@@ -14,14 +14,14 @@ const KEY = 'mobot-live-voice';
 /* ---- settings, kept in localStorage ---- */
 
 const DEFAULTS = {
-    museKind: 'mock', mirror: true, wait: 'block', speak: 'verbatim', routing: 'personal',
+    museKind: 'mock', mirror: true, wait: 'block', speak: 'verbatim', routing: 'personal', button: 'conversation',
     voice: 'iris', handsFree: false, style: DEFAULT_STYLE, notes: DEFAULT_NOTES,
 };
 let settings = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) || '{}') };
 const SESSION_KEYS = ['wait', 'speak', 'routing', 'voice', 'handsFree'];
 
 function showSettings() {
-    for (const name of ['museKind', 'wait', 'speak', 'routing']) {
+    for (const name of ['museKind', 'button', 'wait', 'speak', 'routing']) {
         for (const el of document.querySelectorAll(`input[name="${name}"]`)) {
             el.checked = el.value === settings[name];
         }
@@ -45,6 +45,10 @@ function setSetting(name, value) {
     }
     if (name === 'museKind') {
         useMuse();
+    }
+    if (name === 'button') {
+        orch.endConversation('click');
+        talkLabel();
     }
 }
 
@@ -258,6 +262,15 @@ const orch = new Orchestrator({
         mark,
         event,
         mood: showMood,
+        conversation: (on, why) => {
+            talkLabel();
+            if (!on && why === 'quiet') {
+                sys('Conversation ended after a quiet moment.');
+            }
+            if (on) {
+                sys('Conversation started: talk; it ends by itself after a quiet moment, or click to end.');
+            }
+        },
         error: (t) => bubble('err', '', t),
         level: (p) => { $('level').style.width = Math.min(100, p * 140) + '%'; },
     },
@@ -310,6 +323,7 @@ async function connect() {
 }
 
 rt.onClose = (e) => {
+    orch.endConversation('closed');
     $('xaiPill').textContent = 'xAI · closed';
     $('xaiPill').className = 'pill bad';
     $('connect').textContent = 'Connect';
@@ -351,35 +365,65 @@ async function connectWatch() {
 $('connect').onclick = connect;
 $('serialConnect').onclick = connectWatch;
 
+/* The talk button and Space, like the watch's blue button: in "conversation"
+ * mode a long press (LONG_PRESS_MS) starts a conversation and a click ends it;
+ * in "push" mode it's hold to talk. */
+const LONG_PRESS_MS = 500;
 const talk = $('talk');
+let pressTimer = null;
+
+function talkLabel() {
+    talk.textContent = settings.button === 'push' ? 'Hold to talk' : orch.conversing ? 'Click to end' : 'Hold to start';
+}
+
+function buttonDown() {
+    talk.classList.add('down');
+    if (settings.button === 'push') {
+        orch.press();
+    } else if (orch.conversing) {
+        orch.endConversation('click');
+    } else {
+        pressTimer = setTimeout(() => {
+            pressTimer = null;
+            orch.startConversation();
+        }, LONG_PRESS_MS);
+    }
+}
+
+function buttonUp() {
+    talk.classList.remove('down');
+    if (settings.button === 'push') {
+        orch.release();
+    } else if (pressTimer) {   /* let go before the long press: just a click */
+        clearTimeout(pressTimer);
+        pressTimer = null;
+        $('caption').textContent = 'Hold to start a conversation';
+    }
+}
+
 talk.addEventListener('pointerdown', (e) => {
     talk.setPointerCapture(e.pointerId);
-    talk.classList.add('down');
-    orch.press();
+    buttonDown();
 });
 for (const t of ['pointerup', 'pointercancel']) {
-    talk.addEventListener(t, () => {
-        talk.classList.remove('down');
-        orch.release();
-    });
+    talk.addEventListener(t, buttonUp);
 }
 const typing = () => ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
 window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !e.repeat && !typing() && !talk.disabled) {
         e.preventDefault();
-        talk.classList.add('down');
-        orch.press();
+        buttonDown();
     }
 });
 window.addEventListener('keyup', (e) => {
     if (e.code === 'Space' && !typing()) {
         e.preventDefault();
-        talk.classList.remove('down');
-        orch.release();
+        buttonUp();
     }
 });
+talkLabel();
 
-for (const name of ['museKind', 'wait', 'speak', 'routing']) {
+for (const name of ['museKind', 'button', 'wait', 'speak', 'routing']) {
     for (const el of document.querySelectorAll(`input[name="${name}"]`)) {
         el.onchange = () => el.checked && setSetting(name, el.value);
     }

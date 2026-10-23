@@ -199,7 +199,8 @@ async function main() {
         if (!pill.includes('live')) fail('xAI never connected: ' + pill + ' ' + (await js("document.getElementById('log').innerText")));
         await sleep(600);
 
-        /* Hold Space for 1.2 s: push-to-talk. */
+        /* Hold Space for 1.2 s: push-to-talk (the button's other mode, a long press, starts a conversation). */
+        await js("mobot.settings().button = 'push'");
         const key = (type) => c.send('Input.dispatchKeyEvent', { type, code: 'Space', key: ' ', windowsVirtualKeyCode: 32 });
         await key('keyDown');
         await sleep(400);
@@ -220,6 +221,23 @@ async function main() {
         const conversation = await js("document.getElementById('log').innerText");
         const times = await js("[...document.querySelectorAll('#times tr')].map(r => [...r.cells].map(c => c.textContent).join(' | ')).join('\\n')");
         const voices = await js("[...document.getElementById('voice').options].map(o => o.value).join(',')");
+
+        /* The other mode: a long press on Space starts a conversation, a click ends it. */
+        await js("mobot.settings().button = 'conversation'");
+        await key('keyDown');
+        await sleep(700);
+        await key('keyUp');
+        await sleep(300);
+        const convo = {
+            label: await js("document.getElementById('talk').textContent"),
+            state: await js("document.getElementById('screen').dataset.state"),
+            vad: seen.session?.turn_detection?.type,
+        };
+        await key('keyDown');
+        await key('keyUp');
+        await sleep(300);
+        convo.endLabel = await js("document.getElementById('talk').textContent");
+        convo.endVad = seen.session?.turn_detection?.type;
         c.close();
 
         /* ---- checks ---- */
@@ -240,6 +258,9 @@ async function main() {
             ['transcripts shown for both sides', /YOU\s*\n?What's my next StopWatch task\?/i.test(conversation) && /MOBOT/i.test(conversation)],
             ['timings recorded (ask_muse, Muse answered, answer audible)', /\d\.\d\d s \| \d\.\d\d s \| \d\.\d\d s/.test(times)],
             ['voices listed through server.py', voices.includes('ara')],
+            ['a long press starts a conversation: voice detection on, listening, "Click to end"',
+                convo.vad === 'server_vad' && convo.state === 'listening' && convo.label === 'Click to end'],
+            ['a click ends it: voice detection off, "Hold to start"', convo.endVad === null && convo.endLabel === 'Hold to start'],
             ['no errors in the page', errors.length === 0],
         ];
         let bad = 0;
