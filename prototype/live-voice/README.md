@@ -54,7 +54,7 @@ and server bind to localhost.
 | --- | --- | --- |
 | While Muse thinks | **Wait quietly** (default): thinking clip until Muse answers<br>**Acknowledge**: Grok says "let me ask Muse" and you can keep talking; the answer comes when it's quiet | whether filler helps or, like the thinking phrases, breaks the flow |
 | How Muse's answer is said | **Word for word** (default): Muse's text, cleaned like `speakable()`, in Grok's voice with `force_message`; no model in between<br>**Grok retells it**: Grok gets it as the tool result | fidelity against naturalness |
-| What goes to Muse | **Anything personal** (default)<br>**Everything** except greetings and "stop" | whether Grok's routing misses personal questions |
+| What goes to Muse | **Anything personal** (default): projects, tasks and to-dos, calendar, shopping, notes, reminders, asking or doing<br>**Everything** except greetings and "stop" | whether Grok's routing misses personal questions |
 | Voice | xAI's voices (`iris` is the watch's TTS voice); hands-free uses xAI's voice detection, with headphones | |
 | Style note | sent before each question to Muse, like `MUSE_VOICE_NOTE_STYLE` | |
 

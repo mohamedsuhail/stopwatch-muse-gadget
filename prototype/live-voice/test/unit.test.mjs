@@ -181,6 +181,10 @@ test('session.update asks for 16 kHz PCM both ways, push-to-talk, and both tools
     assert.equal(u.session.voice, 'iris');
     assert.deepEqual(u.session.tools.map((t) => t.name), ['ask_muse', 'set_mood']);
     assert.match(instructions({ routing: 'always', wait: 'async', speak: 'verbatim' }), /every request/);
+    const personal = instructions({ routing: 'personal', wait: 'block', speak: 'verbatim' });
+    for (const topic of ['projects', 'tasks', 'to-dos', 'calendar', 'shopping', 'reminders']) {
+        assert.ok(personal.includes(topic), 'routes ' + topic + ' to Muse');
+    }
 });
 
 test('a short press is ignored; a real one commits and asks for a response', () => {

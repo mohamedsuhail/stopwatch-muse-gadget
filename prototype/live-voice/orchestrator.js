@@ -32,9 +32,12 @@ const MOODS = ['joy', 'thinking', 'sad', 'goodnight'];
 export function instructions(s) {
     const route = s.routing === 'always'
         ? 'Call ask_muse for every request except greetings, thanks, and asking you to repeat, stop or wait.'
-        : 'Call ask_muse for anything about the user or that could depend on them: their projects, work, plans, ' +
-          'notes, people, places, preferences, schedule, history, or anything they told Muse before. ' +
-          'Answer only small talk and general knowledge yourself. Never guess a personal fact.';
+        : 'Call ask_muse for anything personal, to ask or to do: their projects and how they are going; tasks, ' +
+          'to-dos and reminders; their calendar, meetings and plans; shopping lists and things to buy; notes and ' +
+          'ideas; people, places, preferences and history; anything they told Muse before. That includes ' +
+          'requests to add, change or remember something ("add milk to my shopping list", "remind me to ' +
+          'flash the watch tomorrow"). When in doubt whether something is personal, call ask_muse. ' +
+          'Answer only small talk and general knowledge yourself. Never guess or make up a personal fact.';
     const wait = s.wait === 'async'
         ? 'When you call ask_muse, in the same turn say a short acknowledgement of two to five words, ' +
           'such as "Let me ask Muse." Then stop: Muse\'s answer reaches the user on its own, later.'
@@ -48,7 +51,7 @@ export function instructions(s) {
         'their life and projects. You don\'t have that context yourself.',
         'Speak in one to three short, warm, natural sentences. No lists.',
         route,
-        'Write the question for ask_muse in the user\'s own words and make it self-contained: include anything ' +
+        'Write the question or request for ask_muse in the user\'s own words and make it self-contained: include anything ' +
         'from earlier in this conversation that Muse needs to understand it.',
         wait,
         'Call set_mood when the moment clearly fits: joy for good news or a laugh, thinking for a puzzle, sad for ' +
@@ -62,12 +65,13 @@ export function tools() {
         {
             type: 'function',
             name: 'ask_muse',
-            description: 'Ask Muse, the user\'s personal agent, which knows their projects, plans, notes and history. ' +
-                'Use it for anything personal. It takes a few seconds.',
+            description: 'Hand a question or request to Muse, the user\'s personal assistant, which knows and manages ' +
+                'their projects, tasks and to-dos, calendar, shopping lists, notes and history. Use it for anything ' +
+                'personal, whether asking or doing. It takes a few seconds.',
             parameters: {
                 type: 'object',
                 properties: {
-                    question: { type: 'string', description: 'The question for Muse, self-contained, in the user\'s words.' },
+                    question: { type: 'string', description: 'The question or request for Muse, self-contained, in the user\'s words.' },
                 },
                 required: ['question'],
             },
