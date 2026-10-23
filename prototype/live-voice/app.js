@@ -411,6 +411,10 @@ function gadgetLine(st) {
 
 async function gadget(action) {
     const res = await fetch('/api/gadget' + (action ? '/' + action : ''), action ? { method: 'POST' } : {});
+    if (res.status === 404) {
+        $('macStatus').textContent = 'Mac gadget: this server.py is an older one; stop it and start it again';
+        throw new Error('server.py has no gadget controls yet: stop the running server.py and start it again');
+    }
     const st = await res.json();
     if (!res.ok) throw new Error(st.error || 'HTTP ' + res.status);
     gadgetLine(st);
@@ -435,7 +439,7 @@ async function startGadget() {
         }
     } catch (e) {
         bubble('err', '', 'Starting the Mac gadget: ' + e.message);
-        gadget().catch(() => gadgetLine(null));
+        gadget().catch(() => /older/.test($('macStatus').textContent) || gadgetLine(null));
     }
 }
 
@@ -452,7 +456,7 @@ async function stopGadget() {
 }
 $('macStart').onclick = startGadget;
 $('macStop').onclick = stopGadget;
-gadget().catch(() => gadgetLine(null));
+gadget().catch((e) => /older/.test($('macStatus').textContent) || gadgetLine(null));
 
 /* The talk button and Space, like the watch's blue button: in "conversation"
  * mode a long press (LONG_PRESS_MS) starts a conversation and a click ends it;
