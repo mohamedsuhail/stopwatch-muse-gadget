@@ -443,11 +443,40 @@ The tape and the battery ring are hidden on the settings pages.
   the committed fallback, with the original "A7·22·10·K" note. By hand:
   `python3 avatar/make_tape.py FONTS_DIR --note "#28·23·10"`.
 
+### Talking: hands-free conversations
+
+The board file sets `.conversation_talk = true`, so the blue button starts a conversation rather
+than push-to-talk (`converse()` in `muse_voice.c`):
+
+```
+ idle ──long press (0.5 s)──► listening ──you speak, then 0.9 s quiet──► thinking ──► speaking
+  ▲                               ▲                                                     │
+  │                               └───────────────────── the reply ends ───────────────┘
+  └── a click (listening or speaking), or nobody speaks: 6 s after the press, 8 s after a reply
+```
+
+- **Each turn ends when you go quiet,** whether or not you're still holding the button.
+  `muse_vad.c` learns the room's level from the 320 ms pre-roll and keeps following it (down at
+  once, up at 5 dB a second, and across turns): speech is 60 ms at 12 dB over it (and at least
+  −48 dBFS), and 0.9 s at under 6 dB over it ends the turn. The log says why each turn ended:
+  `hands-free turn: quiet after speech after 3.2s, room -55 dBFS`.
+- **The next turn starts after the reply,** skipping 200 ms of the speaker's own tail. The ring
+  follows your voice and the yellow dot shows while it listens.
+- **It ends** when a turn hears nobody (6 s after the long press, 8 s after a reply: nothing is
+  sent), on a click of blue while it listens or speaks (a click stops the reply too), or when a
+  note fails or is saved for later, whose caption stays up. A click while idle only says
+  "Hold to talk".
+- `LONG_PRESS_MS`, `FIRST_QUIET_MS` and `CONVERSATION_QUIET_MS` in `muse_voice.c`, and the
+  `MUSE_VAD_*` levels in `muse_vad.h`, are the numbers to tune. `tests/test_muse_vad.py` feeds the
+  detector speech, a loud fan, a louder room and a single click.
+- The live-voice web prototype (`prototype/live-voice`, branch `live-voice-prototype`) has the same
+  flow, with xAI's voice detection in place of `muse_vad.c`.
+
 ### Wake
 
 The board file sets `.power_wakes_only = true`. While asleep, touch and the yellow button are
-ignored. Red wakes the watch. Holding blue for 0.3 s wakes it and listens, and a shorter click is
-ignored (`HOLD_WAKE_MS` in `muse_input.c`). A pairing prompt or an image from Muse still wakes the
+ignored. Red wakes the watch. Holding blue for 0.3 s wakes it and starts a conversation, and a
+shorter click is ignored (`HOLD_WAKE_MS` in `muse_input.c`). A pairing prompt or an image from Muse still wakes the
 screen.
 
 ## Repo layout

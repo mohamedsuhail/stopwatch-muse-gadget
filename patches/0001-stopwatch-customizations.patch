@@ -1,5 +1,5 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 73c8ffa..8a225f1 100644
+index 73c8ffa..b9beda8 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -43,12 +43,22 @@ if(CONFIG_MUSE_ENABLED)
@@ -12,7 +12,8 @@ index 73c8ffa..8a225f1 100644
      else()
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
      endif()
-     list(APPEND srcs "muse_chat_text.c")
+-    list(APPEND srcs "muse_chat_text.c")
++    list(APPEND srcs "muse_chat_text.c" "muse_vad.c")
 +    list(APPEND srcs "fonts/muse_font_bold_20.c")   # Montserrat Bold 20, ASCII: the state word
 +    # The MOBOT tape label (board .tape_label), copied here by the project's build.sh.
 +    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/tape.rgb565a8")
@@ -68,7 +69,7 @@ index 1f65257..05f57fe 100644
          bool "Isolated board BSP power-characterization firmware"
          # Boards implementing boards/muse_power_test_board.h; extend this list
 diff --git a/esp32/components/muse/boards/board_m5stack_stopwatch.c b/esp32/components/muse/boards/board_m5stack_stopwatch.c
-index 7330e5e..4e55308 100644
+index 7330e5e..1a133e5 100644
 --- a/esp32/components/muse/boards/board_m5stack_stopwatch.c
 +++ b/esp32/components/muse/boards/board_m5stack_stopwatch.c
 @@ -371,7 +371,10 @@ static esp_err_t ioe_set(uint16_t pins, bool high)
@@ -105,7 +106,7 @@ index 7330e5e..4e55308 100644
      };
      const audio_codec_if_t *codec = es8311_codec_new(&s_es_cfg);
      ESP_RETURN_ON_FALSE(codec, ESP_FAIL, TAG, "ES8311 not responding");
-@@ -1095,7 +1104,18 @@ static const muse_board_t s_board = {
+@@ -1095,7 +1104,19 @@ static const muse_board_t s_board = {
      .talk_hint = { LV_ALIGN_CENTER, 144, -110 },
      .speaker_hint = { LV_ALIGN_CENTER, -144, -110 },
      .power_hint = { LV_ALIGN_CENTER, -144, 110 },
@@ -120,6 +121,7 @@ index 7330e5e..4e55308 100644
 +    .pair_arrow = true,         /* pairing: an arrow at the blue button */
 +    .big_reply = true,          /* replies take most of the screen */
 +    .hide_page_dots = true,     /* no page dots: settings are a swipe left */
++    .conversation_talk = true,  /* long-press blue: hands-free turns until quiet or a click */
 +    .hide_state_label = true,   /* the character's animation says what it's doing */
 +    .listen_dots = true,        /* dots while listening, not a timer */
      .init = init,
@@ -1715,10 +1717,10 @@ index ed115e8..7c55a4e 100644
  float muse_audio_dbfs(const int16_t *mono, size_t frames);
  
 diff --git a/esp32/components/muse/muse_board.h b/esp32/components/muse/muse_board.h
-index ddf486b..903cc96 100644
+index ddf486b..8ec4ed8 100644
 --- a/esp32/components/muse/muse_board.h
 +++ b/esp32/components/muse/muse_board.h
-@@ -88,6 +88,30 @@ typedef struct {
+@@ -88,6 +88,34 @@ typedef struct {
      bool flat_menu_hints;
      int frame_ms;           /* face animation period */
      int avatar_px;          /* optional avatar canvas size; 0 uses the UI default */
@@ -1740,6 +1742,10 @@ index ddf486b..903cc96 100644
 +    bool big_reply;
 +    /* No page dots at the bottom: swiping left for settings is known. */
 +    bool hide_page_dots;
++    /* Talk is a conversation, not push-to-talk: a long press starts it hands-free, each
++     * turn ends when you go quiet (muse_vad.c), the next starts after the reply, and it
++     * ends after a quiet spell or a click (muse_voice.c, converse()). */
++    bool conversation_talk;
 +    /* The MOBOT tape label across the top-left, like a sticker on the glass (tape.rgb565a8). */
 +    bool tape_label;
 +    /* A battery ring (charge as its fill, colour by level, green while charging) at this spot,
@@ -4604,11 +4610,159 @@ index d0d4e2f..6b98186 100644
      return ESP_OK;
  }
  
+diff --git a/esp32/components/muse/muse_vad.c b/esp32/components/muse/muse_vad.c
+new file mode 100644
+index 0000000..a57d2ad
+--- /dev/null
++++ b/esp32/components/muse/muse_vad.c
+@@ -0,0 +1,75 @@
++#include "muse_vad.h"
++
++#define FLOOR_START_DB -60.0f   /* until it has heard the room */
++#define FLOOR_RISE_DB 0.1f      /* per chunk under speech: 5 dB a second, to follow a room getting louder */
++
++void muse_vad_init(muse_vad_t *v, unsigned quiet_ms)
++{
++    *v = (muse_vad_t){
++        .floor_db = FLOOR_START_DB,
++        .quiet_limit = quiet_ms / MUSE_VAD_CHUNK_MS,
++        .state = MUSE_VAD_WAITING,
++    };
++}
++
++/* How loud speech is over this floor. */
++static float speech_db(const muse_vad_t *v)
++{
++    float db = v->floor_db + MUSE_VAD_SPEECH_DB;
++    return db < MUSE_VAD_MIN_SPEECH_DB ? MUSE_VAD_MIN_SPEECH_DB : db;
++}
++
++/* The floor follows the quietest chunks down at once and anything short of
++ * speech up slowly, so speech never moves it but a fan coming on (or a first
++ * guess too low) is learnt within seconds. */
++static void learn(muse_vad_t *v, float db)
++{
++    if (db < v->floor_db) {
++        v->floor_db = db;
++    } else if (db < speech_db(v)) {
++        v->floor_db += FLOOR_RISE_DB;
++    }
++}
++
++void muse_vad_hear_room(muse_vad_t *v, float db)
++{
++    if (v->chunks == 0 && v->floor_db == FLOOR_START_DB) {
++        v->floor_db = db;   /* the first chunk heard is the best guess there is */
++    } else {
++        learn(v, db);
++    }
++}
++
++muse_vad_state_t muse_vad_feed(muse_vad_t *v, float db)
++{
++    if (v->state == MUSE_VAD_DONE || v->state == MUSE_VAD_NOTHING) {
++        return v->state;
++    }
++    v->chunks++;
++    bool loud = db >= speech_db(v);
++    bool quiet = db < v->floor_db + MUSE_VAD_SILENCE_DB;
++    if (!loud) {
++        learn(v, db);
++    }
++    if (v->state == MUSE_VAD_WAITING) {
++        v->onset = loud ? v->onset + 1 : 0;
++        if (v->onset >= MUSE_VAD_ONSET_CHUNKS) {
++            v->state = MUSE_VAD_SPEAKING;
++            v->quiet = 0;
++        } else if (v->chunks >= v->quiet_limit) {
++            v->state = MUSE_VAD_NOTHING;
++        }
++        return v->state;
++    }
++    /* Speaking: in between quiet and loud (a soft syllable, a breath) doesn't
++     * end the turn, but doesn't count against the quiet either. */
++    if (quiet) {
++        v->quiet++;
++    } else if (loud) {
++        v->quiet = 0;
++    }
++    if (v->quiet * MUSE_VAD_CHUNK_MS >= MUSE_VAD_END_MS) {
++        v->state = MUSE_VAD_DONE;
++    }
++    return v->state;
++}
+diff --git a/esp32/components/muse/muse_vad.h b/esp32/components/muse/muse_vad.h
+new file mode 100644
+index 0000000..b48fd58
+--- /dev/null
++++ b/esp32/components/muse/muse_vad.h
+@@ -0,0 +1,40 @@
++/*
++ * When a hands-free turn ends: speech, then a quiet moment. Fed one level per
++ * 20 ms chunk (muse_audio_dbfs), it learns the room's floor and says when
++ * someone has spoken and then stopped, or that nobody has spoken at all.
++ */
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++
++#define MUSE_VAD_CHUNK_MS 20
++#define MUSE_VAD_SPEECH_DB 12.0f    /* this far over the floor is speech... */
++#define MUSE_VAD_SILENCE_DB 6.0f    /* ...and under this far is quiet */
++#define MUSE_VAD_MIN_SPEECH_DB -48.0f   /* however quiet the room, speech is at least this loud */
++#define MUSE_VAD_ONSET_CHUNKS 3     /* 60 ms of speech in a row counts as speaking */
++#define MUSE_VAD_END_MS 900         /* quiet this long after speaking ends the turn */
++
++typedef enum {
++    MUSE_VAD_WAITING,   /* nothing said yet */
++    MUSE_VAD_SPEAKING,  /* speech heard; not quiet long enough yet */
++    MUSE_VAD_DONE,      /* spoke, then quiet for MUSE_VAD_END_MS */
++    MUSE_VAD_NOTHING,   /* nobody spoke within the quiet limit */
++} muse_vad_state_t;
++
++typedef struct {
++    float floor_db;          /* the room, learnt from the quietest chunks */
++    int onset, quiet;        /* chunks of speech, and of quiet after it, in a row */
++    size_t chunks;           /* fed so far */
++    size_t quiet_limit;      /* chunks to wait for speech before giving up */
++    muse_vad_state_t state;
++} muse_vad_t;
++
++/* quiet_ms: how long to wait for someone to start speaking. */
++void muse_vad_init(muse_vad_t *v, unsigned quiet_ms);
++
++/* Tells it about the room before listening (the pre-roll's chunks). */
++void muse_vad_hear_room(muse_vad_t *v, float db);
++
++/* One chunk's level; returns the state after it. */
++muse_vad_state_t muse_vad_feed(muse_vad_t *v, float db);
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 38c7c9d..a64fc3f 100644
+index 38c7c9d..e03a9d0 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
-@@ -238,6 +238,12 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -31,6 +31,7 @@
+ #include "muse_adpcm.h"
+ #include "muse_audio.h"
+ #include "muse_board.h"
++#include "muse_vad.h"
+ #include "muse_chat.h"
+ #include "muse_input.h"
+ #include "muse_mem.h"
+@@ -50,6 +51,12 @@ static const char *TAG = "muse_voice";
+ #define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */
+ #endif
+ #define SETTLE_CHUNKS 10   /* after Muse makes a sound, 200 ms of capture is its own tail */
++
++/* conversation_talk boards (converse()): a press this long starts a conversation, and
++ * a turn waits this long for you to start talking before the conversation ends. */
++#define LONG_PRESS_MS 500
++#define FIRST_QUIET_MS 6000          /* right after the long press */
++#define CONVERSATION_QUIET_MS 8000   /* after a reply */
+ #define REST_BACKSTOP_MS 60000
+ 
+ #if CONFIG_MUSE_HATCH
+@@ -238,6 +245,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
      feed_live();
  }
  
@@ -4618,10 +4772,41 @@ index 38c7c9d..a64fc3f 100644
 +    muse_state_set_caption("%s", muse_board->listen_dots ? mark : words);
 +}
 +
++/* Why record() stopped. */
++typedef enum {
++    REC_RELEASED,   /* push-to-talk: let go */
++    REC_MAX,        /* MAX_SECS */
++    REC_DONE,       /* hands-free: spoke, then went quiet */
++    REC_NOTHING,    /* hands-free: nobody spoke */
++    REC_CLICKED,    /* hands-free: talk pressed, to end the conversation */
++} rec_end_t;
++
++static float s_room_db = 1.0f;   /* hands-free turns' room floor, kept between turns; > 0 until heard */
++
  /*
   * Records speech until release or MAX_SECS, starting with the pre-roll; *held
   * gets the part after the press. It streams to Hatch as it goes if it can.
-@@ -255,7 +261,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -246,8 +270,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+  * kept note to fall back on (why says what failed). There is no start chirp:
+  * anything played now would land on top of the first words.
+  */
+-static bool record(bool barge_in, size_t *held, char *why, size_t cap)
++static bool record(bool barge_in, size_t *held, char *why, size_t cap, unsigned quiet_ms, rec_end_t *end)
+ {
++    /* quiet_ms > 0: hands-free. The turn ends when muse_vad says you spoke and
++     * then went quiet, or that you never started; releasing talk doesn't end it,
++     * and pressing it ends the conversation. */
++    bool hands_free = quiet_ms > 0;
++    muse_vad_t vad;
++    muse_vad_init(&vad, quiet_ms);
++    if (s_room_db <= 0) {
++        vad.floor_db = s_room_db;
++    }
++    *end = REC_MAX;
+     muse_state_set_mode(MUSE_MODE_LISTENING);
+     muse_state_set_progress(0);
+     s_rec_n = s_sent = 0;
+@@ -255,7 +289,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
      if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
          go_live();
      }
@@ -4630,7 +4815,29 @@ index 38c7c9d..a64fc3f 100644
      bool heard = false, ok = true;
      bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
      char text[96];
-@@ -289,7 +295,9 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -271,6 +305,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+         for (size_t i = 0; i < s_pre_fill; i++) {
+             pre_get(i, s_chunk);
+             take(&st, s_chunk);
++            muse_vad_hear_room(&vad, muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK));
+             n += MUSE_AUDIO_CHUNK;
+         }
+     }
+@@ -283,13 +318,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+         }
+         muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
+         take(&st, s_chunk);
++        if (hands_free) {
++            muse_vad_state_t v = muse_vad_feed(&vad, muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK));
++            if (v == MUSE_VAD_DONE || v == MUSE_VAD_NOTHING) {
++                *end = v == MUSE_VAD_DONE ? REC_DONE : REC_NOTHING;
++                n += MUSE_AUDIO_CHUNK;
++                break;
++            }
++        }
+         /* Live transcript as the caption. A failure stops the streaming; the
+          * kept note goes later, or without one the failure is the caption. */
+         muse_hatch_ev_t ev;
          while (s_live && (ev = muse_hatch_turn_event(text, sizeof(text))) != MUSE_HATCH_EV_NONE) {
              if (ev == MUSE_HATCH_EV_HEARD && text[0]) {
                  heard = true;
@@ -4641,7 +4848,7 @@ index 38c7c9d..a64fc3f 100644
              } else if (ev == MUSE_HATCH_EV_ERROR) {
                  ESP_LOGW(TAG, "muse: %s", text);
                  muse_hatch_turn_cancel();
-@@ -309,7 +317,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -309,19 +354,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
              go_live();
          }
          muse_state_set_progress((float)n / MAX_FRAMES);
@@ -4650,7 +4857,33 @@ index 38c7c9d..a64fc3f 100644
              muse_state_set_caption("%s %.1fs", s_live ? "LISTENING" : "RECORDING", (double)n / MUSE_AUDIO_RATE);
          }
          /*
-@@ -347,7 +355,7 @@ static void go_idle(const char *caption);
+          * Capture runs 60-80 ms behind real time and people let go on their
+          * last syllable, so keep going briefly after release.
+          */
+-        if (!released && got_event(MUSE_PTT_UP)) {
++        if (hands_free) {
++            if (got_event(MUSE_PTT_DOWN)) {   /* a release is dropped: it doesn't end the turn */
++                *end = REC_CLICKED;
++                break;
++            }
++        } else if (!released && got_event(MUSE_PTT_UP)) {
+             released = true;
++            *end = REC_RELEASED;
+             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
+         }
+     }
+     muse_state_set_level(0);
++    if (hands_free) {
++        s_room_db = vad.floor_db;
++        ESP_LOGI(TAG, "hands-free turn: %s after %.1fs, room %.0f dBFS",
++                 *end == REC_DONE ? "quiet after speech" : *end == REC_NOTHING ? "nobody spoke"
++                 : *end == REC_CLICKED ? "talk pressed" : "max length",
++                 (double)n / MUSE_AUDIO_RATE, vad.floor_db);
++    }
+     *held = n - pre;
+ 
+     char tail[160];
+@@ -347,7 +405,7 @@ static void go_idle(const char *caption);
  static bool hatch_reply(bool *delivered)
  {
      muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4659,7 +4892,7 @@ index 38c7c9d..a64fc3f 100644
      static int16_t buf[MUSE_AUDIO_CHUNK];
      static const int16_t silence[MUSE_AUDIO_CHUNK];
      char text[96];
-@@ -356,19 +364,20 @@ static bool hatch_reply(bool *delivered)
+@@ -356,19 +414,20 @@ static bool hatch_reply(bool *delivered)
      size_t played = 0;
      int64_t t0 = esp_timer_get_time();
      *delivered = false;
@@ -4682,7 +4915,7 @@ index 38c7c9d..a64fc3f 100644
                  }
                  break;
              case MUSE_HATCH_EV_REPLY:
-@@ -420,8 +429,9 @@ static bool hatch_reply(bool *delivered)
+@@ -420,8 +479,9 @@ static bool hatch_reply(bool *delivered)
          }
      }
      muse_state_set_level(0);
@@ -4694,7 +4927,30 @@ index 38c7c9d..a64fc3f 100644
      if (!played) {
          /* No speech (TTS unavailable): leave the reply text up for a moment. */
          vTaskDelay(pdMS_TO_TICKS(2500));
-@@ -639,7 +649,7 @@ static bool send_held(bool quiet)
+@@ -496,6 +556,22 @@ static bool held_on_waking(void)
+     return !got_event(MUSE_PTT_UP);
+ }
+ 
++/*
++ * conversation_talk: talk was just pressed. True if it's still held after
++ * `ms` (a long press, which starts a conversation), false if let go sooner (a
++ * click). The pre-roll keeps running meanwhile, so the first words are kept.
++ */
++static bool held_for(unsigned ms)
++{
++    for (unsigned t = 0; t < ms; t += 1000 * MUSE_AUDIO_CHUNK / MUSE_AUDIO_RATE) {
++        if (got_event(MUSE_PTT_UP)) {
++            return false;
++        }
++        idle_capture();
++    }
++    return !got_event(MUSE_PTT_UP);
++}
++
+ static void drop_rec(void)
+ {
+     free(s_rec);
+@@ -639,7 +715,7 @@ static bool send_held(bool quiet)
               h->tries + 1);
      if (!quiet) {
          muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4703,7 +4959,7 @@ index 38c7c9d..a64fc3f 100644
      }
      muse_hatch_turn_begin();
      size_t sent = 0;
-@@ -665,7 +675,7 @@ static bool send_held(bool quiet)
+@@ -665,7 +741,7 @@ static bool send_held(bool quiet)
          s_next_send_us = 0;   /* the next one right away */
          s_send_backoff_us = RETRY_MIN_US;
          if (quiet) {
@@ -4712,7 +4968,7 @@ index 38c7c9d..a64fc3f 100644
          }
          return interrupted;
      } else if (++h->tries >= HELD_TRIES) {
-@@ -728,7 +738,7 @@ static bool finish_note(void)
+@@ -728,7 +804,7 @@ static bool finish_note(void)
          if (s_live && !fed) {
              /* Hatch is behind (still connecting, say): the rest from the kept note. */
              muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4721,7 +4977,64 @@ index 38c7c9d..a64fc3f 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
-@@ -806,7 +816,6 @@ static void voice_task(void *arg)
+@@ -786,6 +862,56 @@ static bool can_record(void)
+     return true;
+ }
+ 
++/*
++ * conversation_talk: a hands-free conversation, from a long press. Turn after
++ * turn it listens until you go quiet, sends the note and plays the reply, then
++ * listens again. It ends when a turn hears nobody (FIRST_QUIET_MS after the
++ * press, CONVERSATION_QUIET_MS after a reply), on a click of talk (while it
++ * listens, or during a reply, which stops it), or when a note fails or is saved
++ * for later, whose caption then stays up.
++ */
++static void converse(void)
++{
++    ESP_LOGI(TAG, "conversation: started");
++    int turns = 0;
++    for (;;) {
++        if (!can_record()) {
++            return;   /* it set the caption */
++        }
++        size_t held;
++        char why[96];
++        rec_end_t end;
++        bool ok = record(turns > 0, &held, why, sizeof(why), turns ? CONVERSATION_QUIET_MS : FIRST_QUIET_MS, &end);
++        if (end == REC_NOTHING || end == REC_CLICKED) {
++            muse_hatch_turn_cancel();
++            drop_rec();
++            pre_reset();
++            ESP_LOGI(TAG, "conversation: ended (%s) after %d turn%s", end == REC_CLICKED ? "click" : "quiet", turns,
++                     turns == 1 ? "" : "s");
++            go_idle("");
++            return;
++        }
++        if (!ok) {
++            pre_reset();
++            go_idle(why);   /* Hatch failed it while recording */
++            return;
++        }
++        bool interrupted = finish_note();
++        pre_reset();
++        turns++;
++        if (interrupted) {
++            ESP_LOGI(TAG, "conversation: ended (click during the reply) after %d turns", turns);
++            got_event(MUSE_PTT_UP);   /* the click's release */
++            go_idle("");
++            return;
++        }
++        if (muse_state_mode(NULL) == MUSE_MODE_IDLE) {
++            ESP_LOGI(TAG, "conversation: ended (the note failed or was saved) after %d turns", turns);
++            return;   /* its caption stays up */
++        }
++    }
++}
++
+ static void voice_task(void *arg)
+ {
+     bool pending_down = false;
+@@ -806,7 +932,6 @@ static void voice_task(void *arg)
                  pending_down = send_held(asleep);
                  pre_reset();
                  if (!pending_down && !asleep && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
@@ -4729,7 +5042,41 @@ index 38c7c9d..a64fc3f 100644
                      go_idle("");
                  }
                  continue;
-@@ -880,8 +889,9 @@ static void voice_task(void *arg)
+@@ -854,6 +979,23 @@ static void voice_task(void *arg)
+             }
+             wake = ev.wake;
+         }
++        if (muse_board->conversation_talk) {
++            if (pending_down) {
++                pending_down = false;   /* pressed during a reply: that click ends it */
++                got_event(MUSE_PTT_UP);
++                go_idle("");
++                continue;
++            }
++            if (wake ? !held_on_waking() : !held_for(LONG_PRESS_MS)) {
++                if (!wake) {
++                    go_idle("HOLD TO TALK");   /* a click while idle */
++                }
++                continue;
++            }
++            muse_wifi_power(MUSE_WIFI_FULL);
++            converse();
++            continue;
++        }
+         if (wake && !held_on_waking()) {
+             continue;   /* a tap: it only woke Muse */
+         }
+@@ -864,7 +1006,8 @@ static void voice_task(void *arg)
+         }
+         size_t held;
+         char why[96];
+-        bool ok = record(pending_down, &held, why, sizeof(why));
++        rec_end_t end;
++        bool ok = record(pending_down, &held, why, sizeof(why), 0, &end);
+         pending_down = false;
+         if (held < MIN_HELD_FRAMES && !wake) {
+             muse_hatch_turn_cancel();
+@@ -880,8 +1023,9 @@ static void voice_task(void *arg)
          }
          pending_down = finish_note();
          pre_reset();
@@ -5959,6 +6306,140 @@ index 474a187..0ae066c 100644
                  str(ROOT / "tests" / "muse_serial_chat_harness.c"),
                  str(ROOT / "components" / "muse" / "muse_chat_text.c"),
                  str(ROOT / "components" / "muse" / "muse_text.c"),
+diff --git a/esp32/tests/test_muse_vad.py b/esp32/tests/test_muse_vad.py
+new file mode 100644
+index 0000000..b83d2c5
+--- /dev/null
++++ b/esp32/tests/test_muse_vad.py
+@@ -0,0 +1,128 @@
++"""muse_vad.c, the end of a hands-free turn, fed levels as the voice task would (one per 20 ms chunk)."""
++import os
++from pathlib import Path
++import shlex
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++MUSE = ROOT / 'components/muse'
++
++HARNESS = r'''
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "muse_vad.h"
++
++/* Feeds `n` chunks at `db`; returns the chunk (counted from 1) where the state became `want`, or 0. */
++static size_t feed(muse_vad_t *v, size_t n, float db, muse_vad_state_t want)
++{
++    for (size_t i = 0; i < n; i++) {
++        if (muse_vad_feed(v, db) == want) return v->chunks;
++    }
++    return 0;
++}
++
++/* Speech with the dips between words: 200 ms loud, 100 ms soft, repeated. */
++static void speak(muse_vad_t *v, float loud, float soft, int words)
++{
++    for (int w = 0; w < words; w++) {
++        for (int i = 0; i < 10; i++) assert(muse_vad_feed(v, loud) != MUSE_VAD_DONE);
++        for (int i = 0; i < 5; i++) assert(muse_vad_feed(v, soft) != MUSE_VAD_DONE);
++    }
++}
++
++int main(int argc, char **argv)
++{
++    assert(argc == 2);
++    muse_vad_t v;
++    switch (atoi(argv[1])) {
++    case 0: {   /* speech, then quiet: done 0.9 s into the quiet, not before */
++        muse_vad_init(&v, 6000);
++        for (int i = 0; i < 16; i++) muse_vad_hear_room(&v, -55);   /* the 320 ms pre-roll */
++        assert(feed(&v, 10, -55, MUSE_VAD_SPEAKING) == 0);
++        speak(&v, -25, -40, 8);   /* 2.4 s of words, with soft dips between them */
++        assert(v.state == MUSE_VAD_SPEAKING);
++        size_t start = v.chunks;
++        size_t done = feed(&v, 100, -55, MUSE_VAD_DONE);
++        assert(done == start + 900 / MUSE_VAD_CHUNK_MS);
++        break;
++    }
++    case 1: {   /* nobody speaks: nothing, exactly at the quiet limit */
++        muse_vad_init(&v, 8000);
++        for (int i = 0; i < 16; i++) muse_vad_hear_room(&v, -56);
++        assert(feed(&v, 1000, -55, MUSE_VAD_NOTHING) == 8000 / MUSE_VAD_CHUNK_MS);
++        assert(muse_vad_feed(&v, -20) == MUSE_VAD_NOTHING);   /* and it stays over */
++        break;
++    }
++    case 2: {   /* a loud fan: never speech on its own, and speech over it still ends */
++        muse_vad_init(&v, 3000);
++        for (int i = 0; i < 16; i++) muse_vad_hear_room(&v, -40);
++        assert(feed(&v, 100, -38, MUSE_VAD_SPEAKING) == 0);
++        speak(&v, -18, -30, 4);
++        assert(v.state == MUSE_VAD_SPEAKING);
++        assert(feed(&v, 100, -39, MUSE_VAD_DONE) != 0);
++        break;
++    }
++    case 3: {   /* the room louder than the first guess: the floor rises to it, so the turn still ends */
++        muse_vad_init(&v, 6000);
++        muse_vad_hear_room(&v, -62);   /* one quiet chunk before a noisier room */
++        assert(feed(&v, 60, -50, MUSE_VAD_SPEAKING) == 0);   /* -50 isn't speech, only louder room */
++        speak(&v, -24, -38, 4);
++        assert(v.state == MUSE_VAD_SPEAKING);
++        assert(feed(&v, 200, -50, MUSE_VAD_DONE) != 0);
++        break;
++    }
++    case 4: {   /* a single click or bump isn't speech: three chunks in a row are */
++        muse_vad_init(&v, 6000);
++        for (int i = 0; i < 16; i++) muse_vad_hear_room(&v, -55);
++        assert(muse_vad_feed(&v, -15) == MUSE_VAD_WAITING);
++        assert(muse_vad_feed(&v, -55) == MUSE_VAD_WAITING);
++        assert(muse_vad_feed(&v, -15) == MUSE_VAD_WAITING);
++        assert(muse_vad_feed(&v, -15) == MUSE_VAD_WAITING);
++        assert(muse_vad_feed(&v, -15) == MUSE_VAD_SPEAKING);
++        break;
++    }
++    case 5: {   /* a dead-quiet room: speech must still reach MUSE_VAD_MIN_SPEECH_DB */
++        muse_vad_init(&v, 2000);
++        for (int i = 0; i < 16; i++) muse_vad_hear_room(&v, -80);
++        assert(feed(&v, 20, -60, MUSE_VAD_SPEAKING) == 0);   /* 20 dB over the floor, but faint */
++        assert(feed(&v, 5, MUSE_VAD_MIN_SPEECH_DB, MUSE_VAD_SPEAKING) != 0);
++        break;
++    }
++    }
++    return 0;
++}
++'''
++
++
++class MuseVad(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cc = shlex.split(os.environ.get('CC', 'cc'))
++        if not shutil.which(cc[0]):
++            raise unittest.SkipTest('C compiler unavailable')
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.tmp.cleanup)
++        src = Path(cls.tmp.name) / 'vad_test.c'
++        src.write_text(HARNESS)
++        cls.binary = Path(cls.tmp.name) / 'vad_test'
++        subprocess.run([*cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(MUSE),
++                        str(src), str(MUSE / 'muse_vad.c'), '-o', str(cls.binary)], check=True)
++
++    def run_case(self, case):
++        ran = subprocess.run([str(self.binary), str(case)], capture_output=True, text=True)
++        self.assertEqual(ran.returncode, 0, ran.stderr)
++
++    def test_speech_then_quiet_ends_after_the_quiet_time(self): self.run_case(0)
++    def test_nobody_speaks_gives_up_at_the_limit(self): self.run_case(1)
++    def test_loud_fan_is_not_speech_and_speech_over_it_ends(self): self.run_case(2)
++    def test_floor_rises_to_a_louder_room(self): self.run_case(3)
++    def test_a_click_is_not_speech(self): self.run_case(4)
++    def test_faint_sound_in_a_silent_room_is_not_speech(self): self.run_case(5)
++
++
++if __name__ == '__main__':
++    unittest.main()
 diff --git a/esp32/tests/test_muse_voice_note.py b/esp32/tests/test_muse_voice_note.py
 index 8403bec..6cd626c 100644
 --- a/esp32/tests/test_muse_voice_note.py
