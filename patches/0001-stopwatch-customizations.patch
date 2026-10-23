@@ -4738,31 +4738,33 @@ index 0000000..b48fd58
 +/* One chunk's level; returns the state after it. */
 +muse_vad_state_t muse_vad_feed(muse_vad_t *v, float db);
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 38c7c9d..e03a9d0 100644
+index 38c7c9d..e6fb866 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
-@@ -31,6 +31,7 @@
+@@ -31,6 +31,8 @@
  #include "muse_adpcm.h"
  #include "muse_audio.h"
  #include "muse_board.h"
 +#include "muse_vad.h"
++#include "muse_gemini_tts.h"
  #include "muse_chat.h"
  #include "muse_input.h"
  #include "muse_mem.h"
-@@ -50,6 +51,12 @@ static const char *TAG = "muse_voice";
+@@ -50,6 +52,13 @@ static const char *TAG = "muse_voice";
  #define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */
  #endif
  #define SETTLE_CHUNKS 10   /* after Muse makes a sound, 200 ms of capture is its own tail */
 +
 +/* conversation_talk boards (converse()): a press this long starts a conversation, and
 + * a turn waits this long for you to start talking before the conversation ends. */
++#define REPLY_STALL_US (10 * 1000000LL)   /* speech said it was coming but none came this long: give up */
 +#define LONG_PRESS_MS 500
 +#define FIRST_QUIET_MS 6000          /* right after the long press */
 +#define CONVERSATION_QUIET_MS 8000   /* after a reply */
  #define REST_BACKSTOP_MS 60000
  
  #if CONFIG_MUSE_HATCH
-@@ -238,6 +245,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -238,6 +247,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
      feed_live();
  }
  
@@ -4786,7 +4788,7 @@ index 38c7c9d..e03a9d0 100644
  /*
   * Records speech until release or MAX_SECS, starting with the pre-roll; *held
   * gets the part after the press. It streams to Hatch as it goes if it can.
-@@ -246,8 +270,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -246,8 +272,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
   * kept note to fall back on (why says what failed). There is no start chirp:
   * anything played now would land on top of the first words.
   */
@@ -4806,7 +4808,7 @@ index 38c7c9d..e03a9d0 100644
      muse_state_set_mode(MUSE_MODE_LISTENING);
      muse_state_set_progress(0);
      s_rec_n = s_sent = 0;
-@@ -255,7 +289,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -255,7 +291,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
      if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
          go_live();
      }
@@ -4815,7 +4817,7 @@ index 38c7c9d..e03a9d0 100644
      bool heard = false, ok = true;
      bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
      char text[96];
-@@ -271,6 +305,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -271,6 +307,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          for (size_t i = 0; i < s_pre_fill; i++) {
              pre_get(i, s_chunk);
              take(&st, s_chunk);
@@ -4823,7 +4825,7 @@ index 38c7c9d..e03a9d0 100644
              n += MUSE_AUDIO_CHUNK;
          }
      }
-@@ -283,13 +318,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -283,13 +320,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          }
          muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
          take(&st, s_chunk);
@@ -4848,7 +4850,7 @@ index 38c7c9d..e03a9d0 100644
              } else if (ev == MUSE_HATCH_EV_ERROR) {
                  ESP_LOGW(TAG, "muse: %s", text);
                  muse_hatch_turn_cancel();
-@@ -309,19 +354,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -309,19 +356,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
              go_live();
          }
          muse_state_set_progress((float)n / MAX_FRAMES);
@@ -4883,7 +4885,7 @@ index 38c7c9d..e03a9d0 100644
      *held = n - pre;
  
      char tail[160];
-@@ -347,7 +405,7 @@ static void go_idle(const char *caption);
+@@ -347,7 +407,7 @@ static void go_idle(const char *caption);
  static bool hatch_reply(bool *delivered)
  {
      muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4892,9 +4894,11 @@ index 38c7c9d..e03a9d0 100644
      static int16_t buf[MUSE_AUDIO_CHUNK];
      static const int16_t silence[MUSE_AUDIO_CHUNK];
      char text[96];
-@@ -356,19 +414,20 @@ static bool hatch_reply(bool *delivered)
+@@ -355,20 +415,22 @@ static bool hatch_reply(bool *delivered)
+     bool done = false, speaking = false, replied = false;
      size_t played = 0;
      int64_t t0 = esp_timer_get_time();
++    int64_t last_audio = t0, last_note = t0;   /* the stall check and the progress log */
      *delivered = false;
 +    muse_audio_take_limiting();   /* this reply's own */
      for (;;) {
@@ -4915,7 +4919,36 @@ index 38c7c9d..e03a9d0 100644
                  }
                  break;
              case MUSE_HATCH_EV_REPLY:
-@@ -420,8 +479,9 @@ static bool hatch_reply(bool *delivered)
+@@ -407,6 +469,7 @@ static bool hatch_reply(bool *delivered)
+             muse_state_set_level(muse_audio_level(buf, n));
+             muse_audio_write(buf, n);
+             played += n;
++            last_audio = esp_timer_get_time();
+         } else if (done) {
+             break;
+         } else if (speaking) {
+@@ -414,14 +477,30 @@ static bool hatch_reply(bool *delivered)
+             muse_state_set_level(0);
+             muse_audio_write(silence, MUSE_AUDIO_CHUNK);
+         }
++        int64_t now = esp_timer_get_time();
++        if (speaking && now - last_note > 3000000) {
++            last_note = now;
++            ESP_LOGI(TAG, "reply: %.1fs played, speech %d, %s", (double)played / MUSE_AUDIO_RATE,
++                     (int)muse_gemini_tts_state(), done ? "turn done" : "turn open");
++        }
++        /* Speech still says it's coming, but none has for a while: don't hang on it. */
++        if (speaking && !done && muse_gemini_tts_state() == MUSE_GEMINI_TTS_RUNNING && now - last_audio > REPLY_STALL_US) {
++            ESP_LOGW(TAG, "reply stalled: no speech for %llds after %.1fs played; ending it",
++                     (long long)((now - last_audio) / 1000000), (double)played / MUSE_AUDIO_RATE);
++            muse_hatch_turn_cancel();
++            muse_state_set_level(0);
++            go_idle("");
++            return false;
++        }
+         /* The page being said, or before the speech the reply's opening page. */
+         if ((speaking || replied) && muse_hatch_turn_caption(played, page, sizeof(page))) {
+             muse_state_set_caption("%s", page);
          }
      }
      muse_state_set_level(0);
@@ -4927,7 +4960,7 @@ index 38c7c9d..e03a9d0 100644
      if (!played) {
          /* No speech (TTS unavailable): leave the reply text up for a moment. */
          vTaskDelay(pdMS_TO_TICKS(2500));
-@@ -496,6 +556,22 @@ static bool held_on_waking(void)
+@@ -496,6 +575,22 @@ static bool held_on_waking(void)
      return !got_event(MUSE_PTT_UP);
  }
  
@@ -4950,7 +4983,7 @@ index 38c7c9d..e03a9d0 100644
  static void drop_rec(void)
  {
      free(s_rec);
-@@ -639,7 +715,7 @@ static bool send_held(bool quiet)
+@@ -639,7 +734,7 @@ static bool send_held(bool quiet)
               h->tries + 1);
      if (!quiet) {
          muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4959,7 +4992,7 @@ index 38c7c9d..e03a9d0 100644
      }
      muse_hatch_turn_begin();
      size_t sent = 0;
-@@ -665,7 +741,7 @@ static bool send_held(bool quiet)
+@@ -665,7 +760,7 @@ static bool send_held(bool quiet)
          s_next_send_us = 0;   /* the next one right away */
          s_send_backoff_us = RETRY_MIN_US;
          if (quiet) {
@@ -4968,7 +5001,7 @@ index 38c7c9d..e03a9d0 100644
          }
          return interrupted;
      } else if (++h->tries >= HELD_TRIES) {
-@@ -728,7 +804,7 @@ static bool finish_note(void)
+@@ -728,7 +823,7 @@ static bool finish_note(void)
          if (s_live && !fed) {
              /* Hatch is behind (still connecting, say): the rest from the kept note. */
              muse_state_set_mode(MUSE_MODE_THINKING);
@@ -4977,7 +5010,7 @@ index 38c7c9d..e03a9d0 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
-@@ -786,6 +862,56 @@ static bool can_record(void)
+@@ -786,6 +881,56 @@ static bool can_record(void)
      return true;
  }
  
@@ -5034,7 +5067,7 @@ index 38c7c9d..e03a9d0 100644
  static void voice_task(void *arg)
  {
      bool pending_down = false;
-@@ -806,7 +932,6 @@ static void voice_task(void *arg)
+@@ -806,7 +951,6 @@ static void voice_task(void *arg)
                  pending_down = send_held(asleep);
                  pre_reset();
                  if (!pending_down && !asleep && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
@@ -5042,7 +5075,7 @@ index 38c7c9d..e03a9d0 100644
                      go_idle("");
                  }
                  continue;
-@@ -854,6 +979,23 @@ static void voice_task(void *arg)
+@@ -854,6 +998,23 @@ static void voice_task(void *arg)
              }
              wake = ev.wake;
          }
@@ -5066,7 +5099,7 @@ index 38c7c9d..e03a9d0 100644
          if (wake && !held_on_waking()) {
              continue;   /* a tap: it only woke Muse */
          }
-@@ -864,7 +1006,8 @@ static void voice_task(void *arg)
+@@ -864,7 +1025,8 @@ static void voice_task(void *arg)
          }
          size_t held;
          char why[96];
@@ -5076,7 +5109,7 @@ index 38c7c9d..e03a9d0 100644
          pending_down = false;
          if (held < MIN_HELD_FRAMES && !wake) {
              muse_hatch_turn_cancel();
-@@ -880,8 +1023,9 @@ static void voice_task(void *arg)
+@@ -880,8 +1042,9 @@ static void voice_task(void *arg)
          }
          pending_down = finish_note();
          pre_reset();
@@ -5089,10 +5122,10 @@ index 38c7c9d..e03a9d0 100644
      }
 diff --git a/esp32/components/muse/muse_xai_tts.c b/esp32/components/muse/muse_xai_tts.c
 new file mode 100644
-index 0000000..c7041c9
+index 0000000..f5c148c
 --- /dev/null
 +++ b/esp32/components/muse/muse_xai_tts.c
-@@ -0,0 +1,892 @@
+@@ -0,0 +1,903 @@
 +#include "muse_xai_tts.h"
 +
 +#include <math.h>
@@ -5569,12 +5602,23 @@ index 0000000..c7041c9
 +    if (!r.first_audio_us) {
 +        r.first_audio_us = now_us();
 +    }
++    int64_t blocked = 0;   /* when the reply buffer first had no room for this piece */
++    bool told = false;
 +    while (n && !cancelled()) {
 +        size_t sent = xStreamBufferSend(s_out, pcm, n, pdMS_TO_TICKS(SEND_WAIT_MS));
 +        pcm += sent;
 +        n -= sent;
 +        r.pcm_bytes += sent;
 +        atomic_fetch_add(&s_audio_bytes, sent);
++        if (sent) {
++            blocked = 0;
++        } else if (!blocked) {
++            blocked = now_us();
++        } else if (!told && now_us() - blocked > 2000000) {
++            told = true;
++            ESP_LOGW(TAG, "reply buffer full for 2 s (%u bytes waiting, %u played so far)", (unsigned)n,
++                     (unsigned)r.pcm_bytes);
++        }
 +    }
 +}
 +

@@ -462,6 +462,10 @@ than push-to-talk (`converse()` in `muse_voice.c`):
   `hands-free turn: quiet after speech after 3.2s, room -55 dBFS`.
 - **The next turn starts after the reply,** skipping 200 ms of the speaker's own tail. The ring
   follows your voice and the yellow dot shows while it listens.
+- **A reply can't hang:** if speech stops arriving for 10 s while xAI still says it's speaking
+  (`REPLY_STALL_US`), the watch ends the reply and the conversation and goes idle, logging
+  `reply stalled`. While it speaks it logs `reply: Ns played` every 3 s, and xAI's worker logs
+  `reply buffer full` if its 16 s buffer stays full for 2 s.
 - **It ends** when a turn hears nobody (6 s after the long press, 8 s after a reply: nothing is
   sent), on a click of blue while it listens or speaks (a click stops the reply too), or when a
   note fails or is saved for later, whose caption stays up. A click while idle only says
