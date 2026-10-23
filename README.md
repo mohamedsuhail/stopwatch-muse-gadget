@@ -376,6 +376,11 @@ shapes, not set in a font:
 
 - **Listening and sending:** three round white dots that build up, one, two, three, 0.4 s each. The
   level meter and the live transcript are hidden.
+- **The mic is on:** while the watch records, the edge ring is a whole circle that follows your
+  voice, 30% lit in silence and brighter as you speak (its opacity moves in steps of 16, so a
+  steady voice doesn't redraw it), and a small yellow dot shows up and to the left of the battery
+  ring. Both go when recording stops. The mic's 320 ms pre-roll buffer, kept in memory while the
+  screen is on, doesn't light them: nothing is sent until you talk.
 - **Note sent to Muse:** a white tick on a round scrim, for a second; then the dots again until
   Muse's reply arrives.
 - **Muse's reply, errors and short messages** ("Speaker on") stay as words.
