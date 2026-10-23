@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
 """Makes the MOBOT tape label drawn in the top-left of the watch's screen.
 
-    python3 avatar/make_tape.py FONTS_DIR
+    python3 avatar/make_tape.py FONTS_DIR [--note TEXT] [--out FILE] [--preview FILE]
 
 FONTS_DIR holds PermanentMarker.ttf (Apache 2.0, Google Fonts). Writes
 avatar/tape.png (a preview) and avatar/tape.rgb565a8, the image the firmware
 draws at its offset on the 466 px round screen. Needs Pillow.
+
+--note is the blue ballpoint number under MOBOT (default "A7·22·10·K"):
+scripts/build.sh writes the build number there for each build, with --out and
+--preview pointing into the SDK checkout, so the committed files stay as they are.
 """
-import os, struct, sys
+import argparse, os, struct, sys
 from PIL import Image, ImageDraw, ImageFilter
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-FONTS = sys.argv[1]
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape.rgb565a8")
-os.environ["FONTS"] = FONTS
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+ap = argparse.ArgumentParser(description="the MOBOT tape label")
+ap.add_argument("fonts")
+ap.add_argument("--note", default="A7·22·10·K")
+ap.add_argument("--out", default=os.path.join(HERE, "tape.rgb565a8"))
+ap.add_argument("--preview", default=os.path.join(HERE, "tape.png"))
+args = ap.parse_args()
+OUT = args.out
+os.environ["FONTS"] = args.fonts
 from tape_art import worn_tape
 
 R = 466
 CX, CY, ANGLE = 96, 102, 40          # tape centre on screen and its tilt
 
-tape = worn_tape(420, 64, "MOBOT", 38, 7, NOTE="A7·22·10·K")
+tape = worn_tape(420, 64, "MOBOT", 38, 7, NOTE=args.note)
 rot = tape.rotate(ANGLE, resample=Image.BICUBIC, expand=True)
 screen = Image.new("RGBA", (R, R), (0, 0, 0, 0))
 shadow = Image.new("RGBA", rot.size, (0, 0, 0, 0))
@@ -31,7 +41,7 @@ ImageDraw.Draw(circle).ellipse([0, 0, R - 1, R - 1], fill=255)
 screen.putalpha(Image.composite(screen.split()[3], Image.new("L", (R, R), 0), circle))
 x0, y0, x1, y1 = screen.split()[3].point(lambda a: 255 if a > 2 else 0).getbbox()
 img = screen.crop((x0, y0, x1, y1))
-img.save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tape.png"))
+img.save(args.preview)
 
 w, h = img.size
 rgb, alpha = bytearray(), bytearray()

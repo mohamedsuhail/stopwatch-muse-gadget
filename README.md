@@ -418,14 +418,25 @@ buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
   astronaut's suit (`ACCENT` in `avatar/character/muse_pixel.c`).
 
 **Tape label.** `.tape_label = true` draws "MOBOT" on worn white painter's tape across the
-top-left: grime, smudges, rubbed marker, and "A7·22·10·K" (22 Oct) in blue ballpoint. It's one
-image drawn over everything, like tape on the glass. The tape and the battery ring are hidden on
-the settings pages.
+top-left: grime, smudges, rubbed marker, and the **build number** in blue ballpoint, like
+`#28·23·10` (build 28, made 23 Oct). It's one image drawn over everything, like tape on the glass.
+The tape and the battery ring are hidden on the settings pages.
 
-- **Files:** `avatar/make_tape.py` (with `avatar/tape_art.py`) generates `avatar/tape.rgb565a8`,
-  which `build.sh` copies into the SDK and the firmware embeds. `avatar/tape.png` is a preview.
-- **Regenerating it:** needs Pillow and Permanent Marker (Apache 2.0, Google Fonts):
-  `python3 avatar/make_tape.py FONTS_DIR`.
+- **Build number:** `#N` is the number of commits on the branch, with a `+` when `patches/`,
+  `avatar/` or `scripts/` have uncommitted changes, so a test build can't pass for a committed one.
+  `build.sh` writes it, with the commit and the time, to the SDK's `components/muse/tape/build_id.h`
+  and redraws the tape with it for every build. The firmware logs it at boot
+  (`MOBOT build #28 (96046bc, built …)`) and the settings page shows it
+  (`MOBOT #28 (96046bc) - <IP>`), in place of the SDK's placeholder version 999.0.0.
+- **Redrawing needs** [uv](https://docs.astral.sh/uv/) (for Pillow) and Permanent Marker
+  (Apache 2.0, Google Fonts), which `build.sh` downloads once to
+  `~/Library/Caches/stopwatch-muse-gadget/fonts/` and checks against a pinned SHA-256. Without
+  them, the build uses the committed `avatar/tape.rgb565a8` and the number is only in the log and
+  settings.
+- **Files:** `avatar/make_tape.py` (with `avatar/tape_art.py`) draws the tape; `--note` sets the
+  ballpoint text, and `--out`/`--preview` where it goes. `avatar/tape.rgb565a8` and `tape.png` are
+  the committed fallback, with the original "A7·22·10·K" note. By hand:
+  `python3 avatar/make_tape.py FONTS_DIR --note "#28·23·10"`.
 
 ### Wake
 

@@ -1,8 +1,8 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 73c8ffa..cf86355 100644
+index 73c8ffa..8a225f1 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -43,12 +43,18 @@ if(CONFIG_MUSE_ENABLED)
+@@ -43,12 +43,22 @@ if(CONFIG_MUSE_ENABLED)
          "muse_link.c"
          "muse_ble.c")
      if(CONFIG_MUSE_HATCH)
@@ -19,10 +19,14 @@ index 73c8ffa..cf86355 100644
 +        list(APPEND embed "tape/tape.rgb565a8")
 +        set(muse_tape ON)
 +    endif()
++    # The build number, written with the tape for each build.
++    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/build_id.h")
++        set(muse_build_id ON)
++    endif()
      if(CONFIG_MUSE_CJK_FONT)
          list(APPEND srcs "fonts/muse_font_cjk_16.c")   # captions' CJK fallback
      endif()
-@@ -122,7 +128,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
+@@ -122,7 +132,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
  endif()
  
  set(muse_priv_requires
@@ -31,10 +35,13 @@ index 73c8ffa..cf86355 100644
      bt esp-tls mbedtls esp_app_format esp_http_client
      noise_core minimp3
      esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-@@ -138,6 +144,9 @@ idf_component_register(
+@@ -138,6 +148,12 @@ idf_component_register(
      REQUIRES esp_driver_gpio esp_driver_i2c
      PRIV_REQUIRES ${muse_priv_requires}
  )
++if(muse_build_id)
++    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_HAS_BUILD_ID=1)
++endif()
 +if(muse_tape)
 +    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_HAS_TAPE=1)
 +endif()
@@ -3596,10 +3603,20 @@ index 705a5cb..3aca41b 100644
  void muse_settings_set_ble_on(bool on);
  /* A network name is remembered first among the saved ones and joined now;
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 6a372ac..571658d 100644
+index 6a372ac..50a82e1 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
-@@ -45,11 +45,11 @@
+@@ -21,6 +21,9 @@
+ #include <string.h>
+ 
+ #include "esp_app_desc.h"
++#if MUSE_HAS_BUILD_ID
++#include "tape/build_id.h"   /* scripts/build.sh writes it */
++#endif
+ #include "esp_mac.h"
+ #include "esp_timer.h"
+ 
+@@ -45,11 +48,11 @@
  #define ROW_H 58
  #define MAX_APS 12
  
@@ -3616,7 +3633,7 @@ index 6a372ac..571658d 100644
  #define COLOR_OK 0x6ff0bf
  #define COLOR_WARN 0xffb45c
  #define COLOR_DANGER 0xff5c5c
-@@ -103,6 +103,10 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
+@@ -103,6 +106,10 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
  static const char *const SLEEP_NAMES[] = { "Never", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes" };
  #define SLEEP_COUNT (int)(sizeof(SLEEP_CHOICES) / sizeof(SLEEP_CHOICES[0]))
  static lv_obj_t *s_sleep_checks[SLEEP_COUNT];
@@ -3627,7 +3644,7 @@ index 6a372ac..571658d 100644
  
  /* Battery page. */
  static lv_obj_t *s_batt_status, *s_batt_level, *s_batt_drain, *s_batt_full, *s_batt_off, *s_batt_slept, *s_batt_wakes,
-@@ -279,8 +283,9 @@ static lv_obj_t *switch_row(lv_obj_t *list, const char *text, bool on, lv_event_
+@@ -279,8 +286,9 @@ static lv_obj_t *switch_row(lv_obj_t *list, const char *text, bool on, lv_event_
      lv_obj_set_flex_grow(t, 1);
      lv_obj_t *sw = lv_switch_create(c);
      lv_obj_set_size(sw, 60, 32);
@@ -3638,7 +3655,7 @@ index 6a372ac..571658d 100644
      if (on) {
          lv_obj_add_state(sw, LV_STATE_CHECKED);
      }
-@@ -322,7 +327,7 @@ static lv_obj_t *slider(lv_obj_t *list, const char *text, int lo, int hi, int va
+@@ -322,7 +330,7 @@ static lv_obj_t *slider(lv_obj_t *list, const char *text, int lo, int hi, int va
      lv_obj_align(s, LV_ALIGN_TOP_MID, 0, 40);
      lv_slider_set_range(s, lo, hi);
      lv_slider_set_value(s, value, LV_ANIM_OFF);
@@ -3647,7 +3664,7 @@ index 6a372ac..571658d 100644
      lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
      lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_TEXT), LV_PART_KNOB);
      lv_obj_set_style_pad_all(s, 6, LV_PART_KNOB);
-@@ -1074,7 +1079,7 @@ static void build_sound_page(lv_obj_t *tile)
+@@ -1074,7 +1082,7 @@ static void build_sound_page(lv_obj_t *tile)
      lv_obj_set_size(s_mic_bar, lv_pct(94), 10);
      lv_obj_align(s_mic_bar, LV_ALIGN_TOP_MID, 0, 26);
      lv_bar_set_range(s_mic_bar, 0, 60);   /* -70..-10 dBFS */
@@ -3656,7 +3673,7 @@ index 6a372ac..571658d 100644
      lv_obj_set_style_anim_duration(s_mic_bar, 80, 0);
      note(list, "Talk at arm's length: the bar should reach green (-30 to -15 dBFS) without going orange.");
  
-@@ -1107,6 +1112,11 @@ static void on_sleep_choice(lv_event_t *e)
+@@ -1107,6 +1115,11 @@ static void on_sleep_choice(lv_event_t *e)
      muse_settings_set_sleep_s(SLEEP_CHOICES[(int)(intptr_t)lv_event_get_user_data(e)]);
  }
  
@@ -3668,7 +3685,7 @@ index 6a372ac..571658d 100644
  static void on_sleep_now(lv_event_t *e)
  {
      (void)e;
-@@ -1124,6 +1134,12 @@ static void build_sleep_page(lv_obj_t *tile)
+@@ -1124,6 +1137,12 @@ static void build_sleep_page(lv_obj_t *tile)
      }
      button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
      note(list, "Tap the screen or press either button to wake.");
@@ -3681,7 +3698,7 @@ index 6a372ac..571658d 100644
  }
  
  static const char *sleep_name(int secs)
-@@ -1142,6 +1158,10 @@ static void tick_sleep(void)
+@@ -1142,6 +1161,10 @@ static void tick_sleep(void)
      for (int i = 0; i < SLEEP_COUNT; i++) {
          set_text(s_sleep_checks[i], SLEEP_CHOICES[i] == cur ? LV_SYMBOL_OK : "");
      }
@@ -3692,6 +3709,20 @@ index 6a372ac..571658d 100644
  }
  
  /* ---------- Battery ---------- */
+@@ -1336,8 +1359,13 @@ static void tick_home(void)
+     }
+     set_text(s_home_battery, buf);
+ 
++#if MUSE_HAS_BUILD_ID
++    snprintf(buf, sizeof(buf), "MOBOT %s (%s)  -  %s", MOBOT_BUILD, MOBOT_COMMIT,
++             w.state == MUSE_WIFI_CONNECTED ? w.ip : "offline");
++#else
+     snprintf(buf, sizeof(buf), "Muse %s  -  %s", esp_app_get_description()->version,
+              w.state == MUSE_WIFI_CONNECTED ? w.ip : "offline");
++#endif
+     set_text(s_about, buf);
+ }
+ 
 diff --git a/esp32/components/muse/muse_state.c b/esp32/components/muse/muse_state.c
 index 27377e2..7a96720 100644
 --- a/esp32/components/muse/muse_state.c
@@ -3779,7 +3810,7 @@ index ecea3fe..123e386 100644
 +/* The face asked for, and how long ago (secs may be NULL). */
 +muse_reaction_t muse_state_reaction(float *secs);
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..daf7d2e 100644
+index d0d4e2f..840f510 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -3928,7 +3959,7 @@ index d0d4e2f..daf7d2e 100644
      if (!s_cells) {
          lv_obj_invalidate(s_canvas);
          return;
-@@ -502,24 +585,50 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
+@@ -502,24 +585,53 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
      return s_small ? compact : full;
  }
  
@@ -3955,6 +3986,9 @@ index d0d4e2f..daf7d2e 100644
  #endif
 +/* Montserrat Bold 20 (printable ASCII; lv_font_conv from the SIL OFL font): the state word. */
 +LV_FONT_DECLARE(muse_font_bold_20)
++#if MUSE_HAS_BUILD_ID
++#include "tape/build_id.h"   /* scripts/build.sh writes it */
++#endif
 +#if MUSE_HAS_TAPE
 +/* The MOBOT tape label: u16 w, u16 h, i16 x, i16 y, then RGB565A8 (tape.rgb565a8). */
 +extern const uint8_t s_tape_start[] asm("_binary_tape_rgb565a8_start");
@@ -3988,7 +4022,7 @@ index d0d4e2f..daf7d2e 100644
  }
  
  static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
-@@ -666,8 +775,15 @@ static void set_answer(int which)
+@@ -666,8 +778,15 @@ static void set_answer(int which)
      if (!muse_board->round) {
          lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
      }
@@ -4005,7 +4039,7 @@ index d0d4e2f..daf7d2e 100644
          lv_obj_align(s_reply_lbl, LV_ALIGN_CENTER, 0, l->top + l->h / 2);
          lv_obj_set_style_text_align(s_reply_lbl, l->align, 0);
      }
-@@ -684,10 +800,15 @@ static bool fits_across(int w, int y, int ring_in)
+@@ -684,10 +803,15 @@ static bool fits_across(int w, int y, int ring_in)
      return w * w / 4 + y * y <= r * r;
  }
  
@@ -4022,7 +4056,7 @@ index d0d4e2f..daf7d2e 100644
      if (muse_board->round) {
          int r = ring_in - 6;
          int chord = w / 2 < r ? (int)sqrtf((float)(r * r - w * w / 4)) : 0;
-@@ -765,6 +886,11 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -765,6 +889,11 @@ static void build_answer(lv_obj_t *face, int ring_in)
      }
  
      l = &s_answers[ANSWER_READ];
@@ -4034,7 +4068,7 @@ index d0d4e2f..daf7d2e 100644
      int status_bottom = (muse_board->rim_controls ? 40 : 20 + s_dy) + 16 - s_h / 2;
      l->px = MUSE_PX_W * MINI_CELL_PX;
      l->y = status_bottom + 2 + l->px / 2;   /* its sparkles clear of the status line */
-@@ -774,17 +900,23 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -774,17 +903,23 @@ static void build_answer(lv_obj_t *face, int ring_in)
      set_reply_box(l, muse_board->rim_controls ? 13 : 16, 2, top, cw, pitch);
      /* The widest page isn't the biggest: a round screen narrows towards the bottom. */
      /* Keep read replies in a central column clear of dedicated rim hints. */
@@ -4060,7 +4094,7 @@ index d0d4e2f..daf7d2e 100644
      ESP_LOGI(TAG, "reply pages: %d x %d heard, %d x %d read", s_answers[ANSWER_HEARD].cols,
               s_answers[ANSWER_HEARD].lines, l->cols, l->lines);
  
-@@ -794,6 +926,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -794,6 +929,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
      lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
      lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
      lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -4068,7 +4102,7 @@ index d0d4e2f..daf7d2e 100644
  
      if (muse_board->touch && !muse_board->rim_controls) {
          build_speaker(face, spk_x, spk_y);
-@@ -801,7 +934,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -801,7 +937,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
  
      /* Out of the way while a page is up: the mode name, where Muse was. */
      lv_obj_update_layout(face);
@@ -4079,7 +4113,7 @@ index d0d4e2f..daf7d2e 100644
      s_answers[ANSWER_READ].hides[1] = s_name_lbl;   /* the reply takes the top too */
      add_hides(&s_answers[ANSWER_READ], 2);
      add_hides(&s_answers[ANSWER_HEARD], 0);
-@@ -897,7 +1032,7 @@ static void build_screen(void)
+@@ -897,7 +1035,7 @@ static void build_screen(void)
       * whose blank bottom rows can tuck in behind the meter.
       */
      int ring_in = (s_w < s_h ? s_w : s_h) / 2 - 10;   /* the ring's inner edge */
@@ -4088,7 +4122,7 @@ index d0d4e2f..daf7d2e 100644
      int cap_bottom = 179;                              /* a 466 px circle's; fine for rectangles */
      if (muse_board->round) {
          cap_bottom = (int)sqrtf((float)(ring_in * ring_in - CAPTION_W * CAPTION_W / 4)) - 3;
-@@ -906,6 +1041,14 @@ static void build_screen(void)
+@@ -906,6 +1044,14 @@ static void build_screen(void)
      int meter_y = cap_top - 6 - METER_SEG_PX / 2;
      int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
      s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
@@ -4103,7 +4137,7 @@ index d0d4e2f..daf7d2e 100644
  
      /* The character. */
      muse_image_init();
-@@ -933,24 +1076,31 @@ static void build_screen(void)
+@@ -933,24 +1079,31 @@ static void build_screen(void)
      s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
@@ -4140,7 +4174,7 @@ index d0d4e2f..daf7d2e 100644
          lv_label_set_long_mode(s_state_lbl, LV_LABEL_LONG_MODE_DOTS);
          lv_label_set_long_mode(s_name_lbl, LV_LABEL_LONG_MODE_DOTS);
      }
-@@ -984,11 +1134,53 @@ static void build_screen(void)
+@@ -984,11 +1137,53 @@ static void build_screen(void)
          return;
      }
      /* Fixed height: a longer caption ends in dots rather than growing into the ring. */
@@ -4195,7 +4229,7 @@ index d0d4e2f..daf7d2e 100644
      /* Chunky level meter. */
      int span = METER_SEGS * (METER_SEG_PX + METER_GAP_PX) - METER_GAP_PX;
      for (int i = 0; i < METER_SEGS; i++) {
-@@ -996,6 +1188,7 @@ static void build_screen(void)
+@@ -996,6 +1191,7 @@ static void build_screen(void)
          lv_obj_remove_style_all(seg);
          lv_obj_remove_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
          lv_obj_set_size(seg, METER_SEG_PX, METER_SEG_PX);
@@ -4203,7 +4237,7 @@ index d0d4e2f..daf7d2e 100644
          lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
          lv_obj_set_style_bg_color(seg, lv_color_hex(COLOR_METER_OFF), 0);
          int x = -span / 2 + i * (METER_SEG_PX + METER_GAP_PX) + METER_SEG_PX / 2;
-@@ -1010,6 +1203,9 @@ static void build_screen(void)
+@@ -1010,6 +1206,9 @@ static void build_screen(void)
  static void on_cover_event(lv_event_t *e)
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
@@ -4213,7 +4247,7 @@ index d0d4e2f..daf7d2e 100644
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
          muse_state_set_asleep(false);
-@@ -1109,9 +1305,19 @@ static void update_control_hints(muse_mode_t mode)
+@@ -1109,9 +1308,19 @@ static void update_control_hints(muse_mode_t mode)
      if (!s_ptt_hint) return;
      /* Don't obscure settings rows/keyboards with floating physical icons. */
      bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
@@ -4236,7 +4270,7 @@ index d0d4e2f..daf7d2e 100644
      static int last_mode = -1;
      if ((int)mode != last_mode) {
          color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
-@@ -1139,6 +1345,7 @@ static void build_overlays(void)
+@@ -1139,6 +1348,7 @@ static void build_overlays(void)
          lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
          lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
          lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
@@ -4244,7 +4278,7 @@ index d0d4e2f..daf7d2e 100644
          s_dots[i] = d;
      }
  
-@@ -1173,6 +1380,92 @@ static void build_overlays(void)
+@@ -1173,6 +1383,92 @@ static void build_overlays(void)
          update_control_hints(MUSE_MODE_BOOT);
      }
  
@@ -4337,7 +4371,7 @@ index d0d4e2f..daf7d2e 100644
      /* BLE pairing code, or the Muse app's ask for the talk button: a centred
       * column in one typeface, the code large. The small card grows with the hint. */
      s_pair = lv_obj_create(lv_layer_top());
-@@ -1302,8 +1595,8 @@ static void update_chrome(float now)
+@@ -1302,8 +1598,8 @@ static void update_chrome(float now)
          int shown = page * 2 + subpage;
          if (shown != s_shown_page) {
              for (int i = 0; i < 2; i++) {
@@ -4348,7 +4382,7 @@ index d0d4e2f..daf7d2e 100644
              }
              s_shown_page = shown;
          }
-@@ -1318,6 +1611,9 @@ static void update_chrome(float now)
+@@ -1318,6 +1614,9 @@ static void update_chrome(float now)
      if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
          lv_label_set_text(s_wifi_icon, wifi);
      }
@@ -4358,7 +4392,7 @@ index d0d4e2f..daf7d2e 100644
      s_idle_name = idle_name(w.state);
      muse_ble_status_t b;
      muse_ble_status(&b);
-@@ -1337,7 +1633,7 @@ static void update_chrome(float now)
+@@ -1337,7 +1636,7 @@ static void update_chrome(float now)
       * read layout unhides it on the way out. A narrow screen gets the hex tail
       * on its own, which is the part that differs between two of them, rather
       * than a head that ends in dots before it gets there. */
@@ -4367,7 +4401,7 @@ index d0d4e2f..daf7d2e 100644
      int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
      const char *shown = paired ? "" : b.name;
  #if LV_USE_SNAPSHOT
-@@ -1376,7 +1672,11 @@ static void update_chrome(float now)
+@@ -1376,7 +1675,11 @@ static void update_chrome(float now)
              lv_label_set_text(s_pair_hint, hint);
          }
      }
@@ -4380,7 +4414,7 @@ index d0d4e2f..daf7d2e 100644
  
      bool speaker = muse_settings_speaker_on();   /* also set from settings, the phone and serial */
      if (s_speaker && (int)speaker != s_shown_speaker) {
-@@ -1442,6 +1742,17 @@ static void update_power(float now)
+@@ -1442,6 +1745,17 @@ static void update_power(float now)
      if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
          lv_label_set_text(s_power_lbl, buf);
      }
@@ -4398,7 +4432,7 @@ index d0d4e2f..daf7d2e 100644
  }
  
  static void update_status(muse_mode_t mode, float now)
-@@ -1450,13 +1761,18 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1450,13 +1764,18 @@ static void update_status(muse_mode_t mode, float now)
      const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
  
      if (name != s_shown_name) {
@@ -4420,7 +4454,7 @@ index d0d4e2f..daf7d2e 100644
          } else {
              lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
          }
-@@ -1470,7 +1786,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1470,7 +1789,7 @@ static void update_status(muse_mode_t mode, float now)
      if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
          ring = (int)(muse_state_progress() * RING_RANGE);
      } else if (mode == MUSE_MODE_THINKING) {
@@ -4429,7 +4463,7 @@ index d0d4e2f..daf7d2e 100644
      }
      if (s_ring && mode == MUSE_MODE_THINKING) {
          /* Move the indicator rather than rotate the arc: a rotation redraws
-@@ -1498,7 +1814,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1498,7 +1817,7 @@ static void update_status(muse_mode_t mode, float now)
      }
  
      /* The mic's meter; a reply's page has the room while answering. */
@@ -4438,7 +4472,7 @@ index d0d4e2f..daf7d2e 100644
      set_meter_visible(meter);
      if (meter && !s_small) {
          int lit = (int)lroundf(s_level * METER_SEGS);
-@@ -1528,6 +1844,11 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1528,6 +1847,11 @@ static void update_status(muse_mode_t mode, float now)
          if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING) {
              answer = layout;
          }
@@ -4450,7 +4484,7 @@ index d0d4e2f..daf7d2e 100644
      }
      if (answer != s_answer) {
          set_answer(answer);
-@@ -1540,12 +1861,40 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1540,12 +1864,40 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif
@@ -4493,7 +4527,7 @@ index d0d4e2f..daf7d2e 100644
      update_power(now);
  }
  
-@@ -1644,12 +1993,16 @@ static void frame_tick(lv_timer_t *timer)
+@@ -1644,12 +1996,16 @@ static void frame_tick(lv_timer_t *timer)
      float level = muse_state_level();
      s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
  
@@ -4510,6 +4544,16 @@ index d0d4e2f..daf7d2e 100644
      };
      muse_pixel_render(&pose);
      invalidate_muse();
+@@ -1709,6 +2065,9 @@ esp_err_t muse_ui_start(void)
+     muse_board->display_unlock();
+ 
+     ESP_LOGI(TAG, "UI up: %dx%d, %d px Muse, %d ms frames", s_w, s_h, s_canvas_px, muse_board->frame_ms);
++#if MUSE_HAS_BUILD_ID
++    ESP_LOGI(TAG, "MOBOT build %s (%s, built %s)", MOBOT_BUILD, MOBOT_COMMIT, MOBOT_BUILT);
++#endif
+     return ESP_OK;
+ }
+ 
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
 index 38c7c9d..a64fc3f 100644
 --- a/esp32/components/muse/muse_voice.c

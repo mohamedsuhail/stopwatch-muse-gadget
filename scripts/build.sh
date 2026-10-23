@@ -94,11 +94,53 @@ apply_patches() {
         cp "$avatar" "$SDK_DIR/esp32/components/muse/avatar/muse_pixel.c"
         log "using ${avatar#$REPO_ROOT/}"
     fi
-    # The MOBOT tape label (avatar/make_tape.py makes it).
-    if [ -f "$REPO_ROOT/avatar/tape.rgb565a8" ]; then
-        mkdir -p "$SDK_DIR/esp32/components/muse/tape"
-        cp "$REPO_ROOT/avatar/tape.rgb565a8" "$SDK_DIR/esp32/components/muse/tape/tape.rgb565a8"
-        log "using avatar/tape.rgb565a8"
+    stamp_build
+}
+
+# --- Build number, on the MOBOT tape --------------------------------------------
+#
+# "#N" is the number of commits on this branch, with "+" when the firmware's
+# files (patches/, avatar/, scripts/) have uncommitted changes. It goes into
+# tape/build_id.h (logged at boot, shown on the settings page) and onto the tape
+# as its blue ballpoint note, "#N·DD·MM", redrawn by avatar/make_tape.py. With
+# no uv or font, the committed avatar/tape.rgb565a8 is used as it is.
+
+TAPE_FONT_URL="https://github.com/google/fonts/raw/main/apache/permanentmarker/PermanentMarker-Regular.ttf"
+TAPE_FONT_SHA256="28f82c8a7943cb8e9d599f8554da1d4fc75dbcf69b9885ad6c0611d20c6946c5"
+CACHE_ROOT="${STOPWATCH_CACHE:-$HOME/Library/Caches/stopwatch-muse-gadget}"
+
+tape_font() {
+    local dir="$CACHE_ROOT/fonts" font="$CACHE_ROOT/fonts/PermanentMarker.ttf"
+    if [ ! -f "$font" ]; then
+        mkdir -p "$dir"
+        curl -fsSL -o "$font.part" "$TAPE_FONT_URL" && mv "$font.part" "$font" || { rm -f "$font.part"; return 1; }
+    fi
+    [ "$(shasum -a 256 "$font" | cut -d' ' -f1)" = "$TAPE_FONT_SHA256" ] || { warn "tape font checksum mismatch: $font"; return 1; }
+    echo "$dir"
+}
+
+stamp_build() {
+    local tape_dir="$SDK_DIR/esp32/components/muse/tape" num dirty="" commit built fonts
+    mkdir -p "$tape_dir"
+    num="$(git -C "$REPO_ROOT" rev-list --count HEAD)"
+    git -C "$REPO_ROOT" diff --quiet HEAD -- patches avatar scripts || dirty="+"
+    BUILD_ID="#${num}${dirty}"
+    commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+    built="$(date '+%Y-%m-%d %H:%M')"
+    {
+        echo '/* Written by scripts/build.sh for each build: shown on the tape and the settings page. */'
+        echo '#pragma once'
+        echo "#define MOBOT_BUILD \"${BUILD_ID}\""
+        echo "#define MOBOT_COMMIT \"${commit}${dirty:+-dirty}\""
+        echo "#define MOBOT_BUILT \"${built}\""
+    } > "$tape_dir/build_id.h"
+    if command -v uv >/dev/null 2>&1 && fonts="$(tape_font)" && uv run --no-project --with "pillow>=10" python \
+            "$REPO_ROOT/avatar/make_tape.py" "$fonts" --note "${BUILD_ID}·$(date '+%d·%m')" \
+            --out "$tape_dir/tape.rgb565a8" --preview "$tape_dir/tape.png" >/dev/null 2>&1; then
+        log "build ${BUILD_ID} (${commit}${dirty:+, uncommitted changes}), on the tape"
+    elif [ -f "$REPO_ROOT/avatar/tape.rgb565a8" ]; then
+        cp "$REPO_ROOT/avatar/tape.rgb565a8" "$tape_dir/tape.rgb565a8"
+        warn "couldn't redraw the tape (needs uv and the Permanent Marker font): build ${BUILD_ID} is in the log and settings only"
     fi
 }
 
