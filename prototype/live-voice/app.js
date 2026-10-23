@@ -235,6 +235,16 @@ function event(ev, notable) {
 const audio = new Audio();
 const rt = new XaiRealtime();
 const mock = new MuseMock(() => settings.notes);
+/* With the real Muse chosen but no watch, questions fail out loud rather than
+   going to the mock, whose "nothing in your notes" sounds like Muse. */
+const noWatch = {
+    name: 'Muse (watch not connected)',
+    async ask() {
+        throw new Error("the watch isn't connected. Open Setup and click Connect the watch");
+    },
+    async face() {},
+    async close() {},
+};
 let board = null;
 let muse = mock;
 
@@ -258,7 +268,7 @@ function useMuse() {
     if (!want) {
         $('musePill').textContent = 'Muse · watch not connected';
         $('musePill').className = 'pill bad';
-        muse = mock;
+        muse = noWatch;
     } else {
         muse = want;
         $('musePill').textContent = muse === mock ? 'Muse · mock' : 'Muse · watch';
@@ -320,6 +330,14 @@ async function connectWatch() {
         $('musePill').textContent = 'Muse · opening port';
         board = await MuseSerial.connect((tag, text) => sys(`[${tag}] ${text}`));
         board.onRestart = () => sys('The watch restarted; typed turns resume once it has rejoined Wi-Fi.');
+        const connected = board;
+        connected.reading.then(() => {   /* the port went away: unplugged, or the page lost it */
+            if (board === connected && !connected.closed) {
+                board = null;
+                bubble('err', '', 'Watch disconnected. Plug it in and click Connect the watch in Setup.');
+                useMuse();
+            }
+        });
         settings.museKind = 'serial';
         showSettings();
         setSetting('museKind', 'serial');
