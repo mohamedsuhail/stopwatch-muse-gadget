@@ -1,0 +1,23 @@
+[project]
+name = "muse-gadget-mac"
+version = "0.1.0"
+description = "This Mac as a Muse gadget, with a local bridge for the live-voice prototype"
+requires-python = ">=3.10"
+# The SDK's Linux gadget is imported from its checkout (musemac/sdk.py); these
+# are its dependencies plus CoreBluetooth.
+dependencies = [
+    "cryptography>=41",
+    "websockets>=13",
+    "pyobjc-framework-CoreBluetooth>=10",
+    "pyobjc-framework-libdispatch>=10",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
