@@ -5,7 +5,8 @@
 # Usage: scripts/save-patch.sh
 #
 # - Marks every untracked file under esp32/components/muse (except tape/, which
-#   build.sh copies in, and lock files) and esp32/partitions_stopwatch.csv with
+#   build.sh copies in, and lock files), esp32/tests (host-test stand-ins such
+#   as tests/host_include/) and esp32/partitions_stopwatch.csv with
 #   `git add -N`, so the diff includes them, writes the diff, and unmarks them.
 # - Checks the patch applies to a clean checkout of the pinned commit.
 # - Scans it for keys (docs/token.md): the shapes of a Google or xAI key or an
@@ -52,7 +53,7 @@ while IFS= read -r f; do
     esac
     new_files+=("$f")
 done < <(git -C "$SDK_DIR" ls-files --others --exclude-standard -- \
-    esp32/components/muse esp32/partitions_stopwatch.csv)
+    esp32/components/muse esp32/tests esp32/partitions_stopwatch.csv)
 
 if [ ${#new_files[@]} -gt 0 ]; then
     log "new files in the patch:"

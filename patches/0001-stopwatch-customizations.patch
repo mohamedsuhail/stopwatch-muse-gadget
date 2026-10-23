@@ -5820,19 +5820,56 @@ index 0000000..a31cd56
 +# The StopWatch's avatar clips (avatar/character in the stopwatch-muse-gadget repo),
 +# in the 16 MB flash's otherwise unused upper half, to its end.
 +anims,     data, 0x99,    0x830000, 0x7D0000,
+diff --git a/esp32/tests/host_include/esp_heap_caps.h b/esp32/tests/host_include/esp_heap_caps.h
+new file mode 100644
+index 0000000..3184148
+--- /dev/null
++++ b/esp32/tests/host_include/esp_heap_caps.h
+@@ -0,0 +1,13 @@
++/*
++ * Host stand-in for ESP-IDF's esp_heap_caps.h, for the tests that compile
++ * firmware sources on a computer (-I tests/host_include). Every heap is the
++ * process's own, so the capabilities don't matter.
++ */
++#pragma once
++
++#include <stdlib.h>
++
++#define MALLOC_CAP_8BIT 0
++#define MALLOC_CAP_SPIRAM 0
++#define MALLOC_CAP_INTERNAL 0
++#define heap_caps_malloc(n, caps) malloc(n)
+diff --git a/esp32/tests/test_muse_caption_wrap.py b/esp32/tests/test_muse_caption_wrap.py
+index e9ced5a..1f0a2b0 100644
+--- a/esp32/tests/test_muse_caption_wrap.py
++++ b/esp32/tests/test_muse_caption_wrap.py
+@@ -54,6 +54,8 @@ class CaptionWrapTest(unittest.TestCase):
+                 "-Werror",
+                 "-I",
+                 str(ROOT / "components" / "muse"),
++                "-I",
++                str(ROOT / "tests" / "host_include"),
+                 str(ROOT / "tests" / "muse_serial_chat_harness.c"),
+                 str(ROOT / "components" / "muse" / "muse_chat_text.c"),
+                 str(ROOT / "components" / "muse" / "muse_text.c"),
+diff --git a/esp32/tests/test_muse_serial_chat.py b/esp32/tests/test_muse_serial_chat.py
+index 474a187..0ae066c 100644
+--- a/esp32/tests/test_muse_serial_chat.py
++++ b/esp32/tests/test_muse_serial_chat.py
+@@ -67,6 +67,8 @@ class HarnessTest(unittest.TestCase):
+                 "-Werror",
+                 "-I",
+                 str(ROOT / "components" / "muse"),
++                "-I",
++                str(ROOT / "tests" / "host_include"),
+                 str(ROOT / "tests" / "muse_serial_chat_harness.c"),
+                 str(ROOT / "components" / "muse" / "muse_chat_text.c"),
+                 str(ROOT / "components" / "muse" / "muse_text.c"),
 diff --git a/esp32/tests/test_muse_voice_note.py b/esp32/tests/test_muse_voice_note.py
-index 8403bec..9fb93dc 100644
+index 8403bec..6cd626c 100644
 --- a/esp32/tests/test_muse_voice_note.py
 +++ b/esp32/tests/test_muse_voice_note.py
-@@ -20,6 +20,7 @@ import base64
- import io
- import json
- import os
-+import pathlib
- import random
- import shlex
- import struct
-@@ -48,7 +49,11 @@ def riff_header(rate):
+@@ -48,7 +48,11 @@ def riff_header(rate):
  
  # The POST /chat/stream envelope around the base64 WAV, written out rather than
  # read from muse_chat_priv.h: changing what the device sends must change this.
@@ -5845,17 +5882,11 @@ index 8403bec..9fb93dc 100644
          b'"mime_type":"audio/wav","filename":"voice_note.wav","data_base64":"')
  TAIL = b'"}]}'
  
-@@ -64,11 +69,61 @@ def expected_parts(wav_len, part_pcm, part_chars):
+@@ -64,11 +68,51 @@ def expected_parts(wav_len, part_pcm, part_chars):
      return [len(HEAD)] + [part_chars] * full + [(rest + 2) // 3 * 4 + len(TAIL)]
  
  
-+# ESP-IDF headers the sources include that host_compat.h can't stand in for,
-+# since an #include needs a file: written next to the binary at compile time.
-+HOST_HEADERS = {
-+    'esp_heap_caps.h': '#pragma once\n#include <stdlib.h>\n'
-+                       '#define MALLOC_CAP_8BIT 0\n#define MALLOC_CAP_SPIRAM 0\n#define MALLOC_CAP_INTERNAL 0\n'
-+                       '#define heap_caps_malloc(n, caps) malloc(n)\n',
-+}
++HOST_INCLUDE = ROOT / 'tests/host_include'   # esp_heap_caps.h and other stand-ins
 +
 +
 +# note_head() builds the request's head with cJSON and adds the speech-tag hint
@@ -5897,18 +5928,14 @@ index 8403bec..9fb93dc 100644
 +
  def compile_c(out, sources):
      cc = shlex.split(os.environ.get('CC', 'cc'))
-+    inc = pathlib.Path(out).parent / 'host_include'
-+    inc.mkdir(exist_ok=True)
-+    for name, text in HOST_HEADERS.items():
-+        (inc / name).write_text(text)
      result = subprocess.run(
          [*cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', *SANITIZE,
 -         '-include', str(ROOT / 'tests/host_compat.h'), '-I', str(MUSE),
-+         '-include', str(ROOT / 'tests/host_compat.h'), '-I', str(MUSE), '-I', str(inc),
++         '-include', str(ROOT / 'tests/host_compat.h'), '-I', str(MUSE), '-I', str(HOST_INCLUDE),
           *map(str, sources), '-o', str(out)],
          capture_output=True, text=True)
      if result.returncode:
-@@ -198,7 +253,7 @@ class VoiceNoteHelpers(unittest.TestCase):
+@@ -198,7 +242,7 @@ class VoiceNoteHelpers(unittest.TestCase):
          self.assertEqual(body, HEAD + base64.b64encode(riff_header(16000) + pcm) + TAIL)
          request = json.loads(body)
          wav = base64.b64decode(request['items'][0].pop('data_base64'), validate=True)
@@ -5917,20 +5944,107 @@ index 8403bec..9fb93dc 100644
              {'type': 'file', 'mime_type': 'audio/wav', 'filename': 'voice_note.wav'}]})
          self.assertEqual(wav, riff_header(16000) + pcm)
          with wave.open(io.BytesIO(wav)) as w:
-@@ -328,10 +383,14 @@ class HatchVoiceNote(NoteRequestAssertions, unittest.TestCase):
+@@ -328,10 +372,10 @@ class HatchVoiceNote(NoteRequestAssertions, unittest.TestCase):
  /* Not assert(): the fakes must still check under -DNDEBUG. */
  #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); exit(3); } } while (0)
  typedef struct fake_stream *StreamBufferHandle_t;
 -''' + constants + line('enum kind_t') + line('enum mark_t') + types + HATCH_DRIVER + note + HATCH_MAIN
 +''' + constants + line('enum kind_t') + line('enum mark_t') + types + HATCH_DRIVER + NOTE_FAKES + note + HATCH_MAIN
          (out / 'note.cpp').write_text(code)
-+        inc = out / 'host_include'
-+        inc.mkdir(exist_ok=True)
-+        for name, text in HOST_HEADERS.items():
-+            (inc / name).write_text(text)
          flags = ['-Wall', '-Wextra', '-Werror', *SANITIZE,
 -                 '-I', str(ROOT / 'tests'), '-I', str(MUSE),
-+                 '-I', str(ROOT / 'tests'), '-I', str(MUSE), '-I', str(inc),
++                 '-I', str(ROOT / 'tests'), '-I', str(MUSE), '-I', str(HOST_INCLUDE),
                   '-I', str(ROOT / 'components/minimp3/include')]
          cc = shlex.split(os.environ.get('CC', 'cc'))
          cxx = shlex.split(os.environ.get('CXX', 'c++'))
+diff --git a/esp32/tests/test_ostb_echoear_input.py b/esp32/tests/test_ostb_echoear_input.py
+index 34013c8..03283b5 100644
+--- a/esp32/tests/test_ostb_echoear_input.py
++++ b/esp32/tests/test_ostb_echoear_input.py
+@@ -41,7 +41,13 @@ class EchoEarInputTest(unittest.TestCase):
+ static atomic_uint s_touch_talk_events;
+ static bool s_talk_down, pending_pair;
+ static int down, up, confirmed;
+-static struct { const char *talk_button; bool keyboard, touch_talk; } board = {"screen", false, true};
++static struct { const char *talk_button; bool keyboard, touch_talk, power_wakes_only; } board = {"screen", false, true, false};
++typedef unsigned TickType_t;
++static bool s_hold_pending;   /* talk_button's hold-to-wake (power_wakes_only boards only) */
++static TickType_t s_hold_since;
++static TickType_t xTaskGetTickCount(void) { return 0; }
++#define TAG "muse_input"
++#define ESP_LOGI(...) ((void)0)
+ typedef int lv_event_t;
+ #define LV_EVENT_PRESSED 1
+ #define LV_EVENT_RELEASED 2
+diff --git a/esp32/tests/test_stopwatch_controls.py b/esp32/tests/test_stopwatch_controls.py
+index 7546013..9a91c01 100644
+--- a/esp32/tests/test_stopwatch_controls.py
++++ b/esp32/tests/test_stopwatch_controls.py
+@@ -117,7 +117,7 @@ static bool s_power_down, s_power_swallow, s_talk_down;
+ static bool asleep, speaker = true;
+ static int shutdowns, ptt_releases, toggles, pokes;
+ static muse_mode_t mode = MUSE_MODE_IDLE;
+-static struct { const char *power_button, *speaker_button; } board = {"red", "yellow"}, *muse_board = &board;
++static struct { const char *power_button, *speaker_button; bool power_wakes_only; } board = {"red", "yellow", false}, *muse_board = &board;
+ bool muse_state_asleep(void) { return asleep; }
+ static void set_asleep(bool value, const char *why) { (void)why; asleep = value; }
+ void muse_state_poke(void) { ++pokes; }
+@@ -149,6 +149,11 @@ int main(int argc, char **argv) {
+         mode = MUSE_MODE_SPEAKING; dedicated_buttons(MUSE_BTN_SPEAKER_PRESS); assert(speaker && toggles == 2);
+         asleep = true; dedicated_buttons(MUSE_BTN_SPEAKER_PRESS); assert(!asleep && toggles == 2);
+         mode = MUSE_MODE_OFF; dedicated_buttons(MUSE_BTN_SPEAKER_PRESS); assert(toggles == 2);
++    } else if (test == 4) {
++        board.power_wakes_only = true;   /* the StopWatch: asleep, only power and talk wake it */
++        asleep = true; dedicated_buttons(MUSE_BTN_SPEAKER_PRESS); assert(asleep && toggles == 0 && pokes == 1);
++        asleep = false; dedicated_buttons(MUSE_BTN_SPEAKER_PRESS); assert(!speaker && toggles == 1); /* awake, it still toggles */
++        asleep = true; dedicated_buttons(MUSE_BTN_POWER_PRESS); assert(!asleep); /* power still wakes */
+     } else {
+         dedicated_buttons(MUSE_BTN_AUX_PRESS | MUSE_BTN_AUX_RELEASE | MUSE_BTN_TALK_PRESS | MUSE_BTN_TALK_RELEASE);
+         assert(!asleep && toggles == 0 && shutdowns == 0 && pokes == 0); /* other boards untouched */
+@@ -165,19 +170,35 @@ static struct { char text[64]; bool hidden; } hints[3];
+ typedef void lv_obj_t;
+ static lv_obj_t *s_ptt_hint = &hints[0], *s_spk_hint = &hints[1], *s_pwr_hint = &hints[2];
+ static lv_obj_t *s_tv = (void *)1, *s_settings = (void *)2;
++static struct { bool hide_rim_hints; } board, *muse_board = &board;
++static struct { char text[64]; bool hidden; } tape, ring;   /* the StopWatch's MOBOT tape and battery ring */
++static lv_obj_t *s_tape, *s_batt_ring;   /* NULL on boards without them */
++static bool s_on_settings;
+ static bool settings, speaker = true;
+ static uint32_t mic_color;
+ static int lv_calls;
+ static void color_mic(void *icon, uint32_t color) { assert(icon == s_ptt_hint); mic_color = color; ++lv_calls; }
+ static void *lv_tileview_get_tile_active(void *tv) { (void)tv; return settings ? s_settings : 0; }
+ static void lv_obj_set_flag(void *obj, int flag, bool value) { (void)flag; ((typeof(hints[0]) *)obj)->hidden = value; ++lv_calls; }
++static void lv_obj_add_flag(void *obj, int flag) { lv_obj_set_flag(obj, flag, true); }
+ static const char *lv_label_get_text(void *obj) { return ((typeof(hints[0]) *)obj)->text; }
+ static void lv_label_set_text(void *obj, const char *text) { strcpy(((typeof(hints[0]) *)obj)->text, text); }
+ static void lv_obj_set_style_text_color(void *obj, int color, int part) { (void)obj; (void)color; (void)part; }
+ static int lv_color_hex(int color) { return color; }
+ static bool muse_settings_speaker_on(void) { return speaker; }
+ ''' + function(cls.ui, 'update_control_hints') + r'''
+-int main(void) {
++int main(int argc, char **argv) {
++    assert(argc == 2);
++    if (atoi(argv[1]) == 1) {
++        /* The StopWatch: rim hints hidden for good; settings hide the tape and the battery ring. */
++        board.hide_rim_hints = true; s_tape = &tape; s_batt_ring = &ring;
++        update_control_hints(MUSE_MODE_IDLE);
++        assert(hints[0].hidden && hints[1].hidden && hints[2].hidden && !tape.hidden && !ring.hidden);
++        settings = true; update_control_hints(MUSE_MODE_IDLE); assert(tape.hidden && ring.hidden);
++        settings = false; update_control_hints(MUSE_MODE_IDLE);
++        assert(!tape.hidden && hints[0].hidden); /* the tape comes back; update_power() brings the ring */
++        return 0;
++    }
+     strcpy(hints[2].text, LV_SYMBOL_POWER); /* created once, never replaced by words */
+     for(int m = MUSE_MODE_BOOT; m <= MUSE_MODE_OFF; ++m) {
+         update_control_hints(m);
+@@ -285,7 +306,9 @@ int main(int argc, char **argv) {
+     def test_power_hold_consumed_after_failure_and_ends_ptt(self): self.run_case('input', 1)
+     def test_speaker_toggle_and_wake_only(self): self.run_case('input', 2)
+     def test_legacy_aux_and_talk_not_reinterpreted(self): self.run_case('input', 3)
++    def test_power_wakes_only_keeps_speaker_from_waking(self): self.run_case('input', 4)
+     def test_icon_hints_all_modes_mute_and_settings(self): self.run_case('ui', 0)
++    def test_hidden_rim_hints_and_settings_hide_tape_and_ring(self): self.run_case('ui', 1)
+     def test_led_usb_battery_transitions_preserve_rails(self): self.run_case('power', 0)
+     def test_led_vin_read_failure_is_not_a_transition(self): self.run_case('power', 1)
+     def test_led_config_read_failure_does_not_write(self): self.run_case('power', 2)
