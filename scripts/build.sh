@@ -144,7 +144,7 @@ stamp_build() {
     fi
     # Grok's and Muse's logos, by the battery ring in a live conversation (avatar/make_icons.py).
     local logo
-    for logo in grok muse; do
+    for logo in grok muse gemini; do
         if [ -f "$REPO_ROOT/avatar/icons/$logo.rgb565a8" ]; then
             cp "$REPO_ROOT/avatar/icons/$logo.rgb565a8" "$tape_dir/"
         fi

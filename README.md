@@ -484,13 +484,37 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   stops (xAI cancels it itself); if not, it was a noise, the reply goes on and that audio is
   discarded. The log says `maybe a barge-in`, then `barge-in: xAI heard you` or
   `not a barge-in: xAI heard no speech`, and after each reply how loud the mic heard the speaker.
+- **Live facts:** the weather, news, sports and anything current go to the voice's own web
+  search (xAI's `web_search`, Gemini's Google Search), located at your city from the profile's
+  `PLACE:` line: about a second, against Muse's ten or twenty.
 - **On screen:** only listening or speaking, never a waiting state or dots (the mic is open the
-  whole time). The ring is a steady 10 px white band while it listens or speaks: one that
-  followed the voice redrew the whole screen at every step and halved the frame rate. Captions
-  sit on their scrim over the full-size character, which doesn't shrink for them.
+  whole time); listening shows the calm idle clip, not the busy listening loop. The ring is a
+  steady 10 px white band while it listens or speaks: one that followed the voice redrew the
+  whole screen at every step and halved the frame rate. A yellow dot at 6 o'clock says it's
+  listening. Captions are the last four lines said, left-aligned in the bottom half on their
+  scrim over the full-size character, kept with the audio as it plays. The voice's logo (Grok,
+  Gemini or Muse, 20 px, up and left of the battery ring) has a spinner round it while we
+  wait on it.
+- **A click** while it speaks stops the reply and the conversation goes on; while it listens,
+  a click ends the conversation. The top-left button (the speaker) says "SPEAKER ON/OFF"
+  mid-conversation too: with it off you hear nothing.
 - **It ends** on a click, or with nobody talking, nothing playing and nothing waiting on Grok or
   Muse for 6 s after the press (8 s once there's been a reply), or if the connection fails, whose
   reason stays up ("CAN'T REACH XAI", "XAI KEY REFUSED", "LOST XAI").
+- **Two live voices:** xAI's Grok (the default) or Google's Gemini Live
+  (`gemini-3.1-flash-live-preview`, voice Leda), chosen over serial with
+  `>live_provider=gemini` or `>live_provider=xai` and kept in NVS. Gemini uses the stored Gemini
+  key (`>gemini_key=...`). It costs about a sixth as much a minute (Google bills audio streamed,
+  about $0.005/min in and $0.018/min out; xAI bills $0.08 for every minute a session is open).
+  The differences:
+  - Audio goes up as base64 8 kHz PCM in JSON (Gemini has no binary or mu-law input) and comes
+    down at 24 kHz, resampled to 16 kHz on the watch (`muse_resample.c`).
+  - There's no verbatim speech, so Muse's answer goes back as the tool's result with a note to
+    say it word for word.
+  - It searches with Google Search, and its logo is Gemini's star.
+  - It can't be interrupted by voice. With the speaker coming back 10 dB over a voice in this
+    mic, it heard and believed its own words. A click stops its reply instead (with either
+    voice: a click while it listens still ends the conversation).
 - The protocol and instructions are the live-voice prototype's (`prototype/live-voice/orchestrator.js`,
   branch `live-voice-prototype`), which the simulator keeps matching. `tests/test_muse_echo.py`
   feeds the echo gate a reply's echo, a voice over it and the StopWatch's loud speaker.

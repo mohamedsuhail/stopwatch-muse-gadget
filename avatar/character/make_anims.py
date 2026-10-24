@@ -42,6 +42,29 @@ def frames(name):
             out.append(clean)
         return out
 
+def figure(im):
+    """The character's box: what isn't background."""
+    return im.convert("L").point(lambda v: 255 if v > 30 else 0).getbbox()
+
+def match_size(ims, ref):
+    """Scales a clip so its first (neutral) frame's figure is as tall as idle's,
+    its feet where idle's are: the clips were shot a little closer or further,
+    and switching between them showed the character grow and shrink."""
+    b = figure(ims[0])
+    f = (ref[3] - ref[1]) / (b[3] - b[1])
+    if abs(f - 1) < 0.01:
+        return ims, 1.0
+    out = []
+    for im in ims:
+        big = im.resize((round(SIZE * f), round(SIZE * f)), Image.LANCZOS)
+        # the first frame's bottom centre lands on idle's
+        dx = round((ref[0] + ref[2]) / 2 - (b[0] + b[2]) / 2 * f)
+        dy = round(ref[3] - b[3] * f)
+        frame = Image.new("RGB", (SIZE, SIZE))
+        frame.paste(big, (dx, dy))
+        out.append(frame)
+    return out, f
+
 def diff(a, b):
     return sum(ImageStat.Stat(ImageChops.difference(a, b).convert("L")).mean)
 
@@ -55,8 +78,13 @@ def best_loop(ims):
     return best[1], best[2]
 
 table, jpegs = [], []
+ref = figure(frames("idle")[0])
 for name in STATES:
     ims = frames(name)
+    if name != "wake":   # wake starts curled up: nothing neutral to match
+        ims, f = match_size(ims, ref)
+        if f != 1.0:
+            print(f"{name:10s} scaled {f:.3f} to idle's size")
     s, e = (0, len(ims)) if name in ONCE else best_loop(ims)
     table.append((len(jpegs), e - s, 1 if name in ONCE else 0))
     for im in ims[s:e]:

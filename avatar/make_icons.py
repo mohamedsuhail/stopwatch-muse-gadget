@@ -3,8 +3,9 @@
 
     python3 avatar/make_icons.py [--size PX] [--out DIR]
 
-From avatar/icons/muse-source.png (Muse's blue mark) and grok-source.png (xAI's
-Grok mark), both on white, writes for each NAME:
+From avatar/icons/muse-source.png (Muse's blue mark), grok-source.png (xAI's
+Grok mark), both on white, and gemini-source.png (Gemini's star, already
+transparent), writes for each NAME:
   DIR/NAME.rgb565a8   for the firmware: u16 width, u16 height, then LVGL's
                       RGB565A8 (the RGB565 plane, then the alpha plane)
   avatar/icons/NAME.png   the same icon, transparent, for previews and the
@@ -18,7 +19,7 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICONS = os.path.join(HERE, "icons")
 ap = argparse.ArgumentParser(description="the responder logos")
-ap.add_argument("--size", type=int, default=22)
+ap.add_argument("--size", type=int, default=20)   # inside the 32 px waiting spinner
 ap.add_argument("--out", default=ICONS)
 args = ap.parse_args()
 
@@ -63,4 +64,5 @@ def write(name, im):
 
 
 write("muse", square(unwhite(Image.open(os.path.join(ICONS, "muse-source.png"))), args.size))
+write("gemini", square(Image.open(os.path.join(ICONS, "gemini-source.png")).convert("RGBA"), args.size))   # already transparent
 write("grok", square(unwhite(Image.open(os.path.join(ICONS, "grok-source.png")), recolour=(255, 255, 255)), args.size))

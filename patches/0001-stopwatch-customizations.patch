@@ -1,8 +1,8 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index 73c8ffa..8e533b1 100644
+index 73c8ffa..e271205 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -43,12 +43,28 @@ if(CONFIG_MUSE_ENABLED)
+@@ -43,12 +43,29 @@ if(CONFIG_MUSE_ENABLED)
          "muse_link.c"
          "muse_ble.c")
      if(CONFIG_MUSE_HATCH)
@@ -14,7 +14,7 @@ index 73c8ffa..8e533b1 100644
          list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
      endif()
 -    list(APPEND srcs "muse_chat_text.c")
-+    list(APPEND srcs "muse_chat_text.c" "muse_vad.c" "muse_echo.c")
++    list(APPEND srcs "muse_chat_text.c" "muse_vad.c" "muse_echo.c" "muse_resample.c")
 +    list(APPEND srcs "fonts/muse_font_bold_20.c")   # Montserrat Bold 20, ASCII: the state word
 +    # The MOBOT tape label (board .tape_label), copied here by the project's build.sh.
 +    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/tape.rgb565a8")
@@ -22,8 +22,9 @@ index 73c8ffa..8e533b1 100644
 +        set(muse_tape ON)
 +    endif()
 +    # Who's answering in a live conversation: Grok's and Muse's logos (avatar/make_icons.py), copied with the tape.
-+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/grok.rgb565a8" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/muse.rgb565a8")
-+        list(APPEND embed "tape/grok.rgb565a8" "tape/muse.rgb565a8")
++    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/grok.rgb565a8" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/muse.rgb565a8"
++       AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/tape/gemini.rgb565a8")
++        list(APPEND embed "tape/grok.rgb565a8" "tape/muse.rgb565a8" "tape/gemini.rgb565a8")
 +        set(muse_logos ON)
 +    endif()
 +    # The build number, written with the tape for each build.
@@ -33,7 +34,7 @@ index 73c8ffa..8e533b1 100644
      if(CONFIG_MUSE_CJK_FONT)
          list(APPEND srcs "fonts/muse_font_cjk_16.c")   # captions' CJK fallback
      endif()
-@@ -122,7 +138,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
+@@ -122,7 +139,7 @@ elseif(CONFIG_HOMEHUB_VOICE)
  endif()
  
  set(muse_priv_requires
@@ -42,7 +43,7 @@ index 73c8ffa..8e533b1 100644
      bt esp-tls mbedtls esp_app_format esp_http_client
      noise_core minimp3
      esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
-@@ -138,6 +154,15 @@ idf_component_register(
+@@ -138,6 +155,15 @@ idf_component_register(
      REQUIRES esp_driver_gpio esp_driver_i2c
      PRIV_REQUIRES ${muse_priv_requires}
  )
@@ -2671,10 +2672,10 @@ index 0000000..fb07adf
 +bool muse_echo_feed(muse_echo_t *e, float spk_db, float mic_db);
 diff --git a/esp32/components/muse/muse_gemini_tts.c b/esp32/components/muse/muse_gemini_tts.c
 new file mode 100644
-index 0000000..5163791
+index 0000000..184517e
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.c
-@@ -0,0 +1,865 @@
+@@ -0,0 +1,871 @@
 +#include "muse_gemini_tts.h"
 +
 +#include <math.h>
@@ -2808,6 +2809,12 @@ index 0000000..5163791
 +        s_key[0] = '\0';
 +    }
 +    nvs_close(h);
++}
++
++bool muse_gemini_tts_key(char *out, size_t cap)
++{
++    load_key();
++    return s_key[0] && strlcpy(out, s_key, cap) < cap;
 +}
 +
 +bool muse_gemini_tts_configured(void)
@@ -3542,10 +3549,10 @@ index 0000000..5163791
 +}
 diff --git a/esp32/components/muse/muse_gemini_tts.h b/esp32/components/muse/muse_gemini_tts.h
 new file mode 100644
-index 0000000..4e10649
+index 0000000..f8ece3b
 --- /dev/null
 +++ b/esp32/components/muse/muse_gemini_tts.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,66 @@
 +#pragma once
 +
 +#include <stdbool.h>
@@ -3589,6 +3596,9 @@ index 0000000..4e10649
 +/* A key is stored. */
 +bool muse_gemini_tts_configured(void);
 +
++/* The stored Gemini key, for muse_live.c: false if there's none. Never log it. */
++bool muse_gemini_tts_key(char *out, size_t cap);
++
 +/* Opens the connection ahead of a reply, if there's a key and none is open. Returns at once. */
 +void muse_gemini_tts_warm(void);
 +
@@ -3610,7 +3620,7 @@ index 0000000..4e10649
 +}
 +#endif
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 5a60abf..70226f0 100644
+index 5a60abf..1dabc18 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -45,6 +45,9 @@
@@ -3725,7 +3735,7 @@ index 5a60abf..70226f0 100644
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
   * click. LONG is supplied by the board only after a validated hold. */
  static bool s_power_down, s_power_swallow;
-@@ -504,7 +558,9 @@ static void dedicated_buttons(unsigned ev)
+@@ -504,12 +558,15 @@ static void dedicated_buttons(unsigned ev)
      if (release) power_release();
      if (ev & MUSE_BTN_SPEAKER_PRESS) {
          muse_state_poke();
@@ -3736,7 +3746,14 @@ index 5a60abf..70226f0 100644
              set_asleep(false, muse_board->speaker_button);   /* wake-only press */
          } else if (muse_state_mode(NULL) != MUSE_MODE_OFF) {
              bool on = !muse_settings_speaker_on();
-@@ -579,11 +635,13 @@ static void input_task(void *arg)
+             muse_settings_set_speaker_on(on);
+-            if (muse_state_mode(NULL) == MUSE_MODE_IDLE) {
++            /* live_talk: say so mid-conversation too, where it's easy to press by accident. */
++            if (muse_state_mode(NULL) == MUSE_MODE_IDLE || muse_board->live_talk) {
+                 muse_state_set_caption(on ? "SPEAKER ON" : "SPEAKER OFF");
+             }
+         }
+@@ -579,11 +636,13 @@ static void input_task(void *arg)
  
          paused = update_power();
          bool napping = update_wifi_nap(now, paused);
@@ -3751,7 +3768,7 @@ index 5a60abf..70226f0 100644
              muse_board->wait_buttons(napping ? NAP_WAIT_MS : REST_WAIT_MS);
          } else {
              vTaskDelay(pdMS_TO_TICKS(paused ? REST_POLL_MS : POLL_MS));
-@@ -676,7 +734,7 @@ static void set_face(const char *name)
+@@ -676,7 +735,7 @@ static void set_face(const char *name)
      muse_state_poke();
      bool happy = !strcmp(name, "happy");
      if (happy) {
@@ -3762,10 +3779,10 @@ index 5a60abf..70226f0 100644
          if (!strcmp(name, modes[m])) {
 diff --git a/esp32/components/muse/muse_live.c b/esp32/components/muse/muse_live.c
 new file mode 100644
-index 0000000..7f83c90
+index 0000000..79a57b3
 --- /dev/null
 +++ b/esp32/components/muse/muse_live.c
-@@ -0,0 +1,1478 @@
+@@ -0,0 +1,2167 @@
 +#include "muse_live.h"
 +
 +#include <math.h>
@@ -3790,6 +3807,8 @@ index 0000000..7f83c90
 +#include "muse_chat_priv.h"
 +#include "muse_mem.h"
 +#include "muse_wifi.h"
++#include "muse_gemini_tts.h"
++#include "muse_resample.h"
 +#include "muse_ws.h"
 +#include "muse_xai_tts.h"
 +#include "nvs.h"
@@ -3798,6 +3817,11 @@ index 0000000..7f83c90
 +
 +#define HOST "api.x.ai"
 +#define PATH "/v1/realtime?model=grok-voice-latest"
++#define GEMINI_HOST "generativelanguage.googleapis.com"
++#define GEMINI_PATH "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key="
++#define GEMINI_MODEL "models/gemini-3.1-flash-live-preview"
++#define GEMINI_VOICE "Leda"
++#define GEMINI_RATE 24000                     /* its speech always comes at 24 kHz */
 +#define VOICE "iris"                          /* the voice xAI's speech uses on the watch */
 +#define RATE 16000
 +#define KEY_MAX 160
@@ -3824,6 +3848,7 @@ index 0000000..7f83c90
 +#define NVS_NS "muse_live"
 +#define PROFILE_MAX 800
 +#define TZ_MAX 64
++#define PLACE_MAX 96
 +#define PROFILE_AGE_S (24 * 3600)             /* older than this, Muse is asked again after a conversation */
 +#define CLOCK_SET_AFTER 1700000000            /* time() past this (late 2023): the clock has been set */
 +
@@ -3853,12 +3878,17 @@ index 0000000..7f83c90
 +    "to-dos and reminders; their calendar, meetings and plans; shopping lists and things to buy; notes and "
 +    "ideas; people, places, preferences and history; anything they told you before. That includes requests "
 +    "to add, change or remember something (\"add milk to my shopping list\", \"remind me to call Sam "
-+    "tomorrow\"). When in doubt whether something is personal, call ask_muse. Answer only small talk and "
-+    "general knowledge yourself. Never guess or make up a personal fact.\n"
++    "tomorrow\"). When in doubt whether something is personal, call ask_muse. Never guess or make up a personal "
++    "fact.\n"
++    "Greetings, how-are-you, thanks, jokes and other small talk are never personal: answer them yourself, "
++    "straight away, without ask_muse.\n"
++    "For the weather, news, sports, prices, opening hours and anything else current that isn't personal, use "
++    "web_search: it's quick, so never ask Muse for those. Answer small talk and general knowledge yourself.\n"
 +    "Write the question or request for ask_muse in the user's own words and make it self-contained: include "
 +    "anything from earlier in this conversation needed to understand it.\n"
 +    "When you call ask_muse, say only \"Let me check with Muse.\" first, and nothing after it: the answer is "
-+    "read to the user word for word. If the result is an error, say briefly that you couldn't check just now.\n"
++    "read to the user word for word. Never say the question you pass to ask_muse out loud. If the result is "
++    "an error, say briefly that you couldn't check just now.\n"
 +    "Your face shows on the user's screen. Call set_mood, as you start speaking, whenever your reply has a clear "
 +    "feeling: joy when you're glad, something's funny or there's good news; thinking when you're working "
 +    "something out; sad for bad news or sympathy; goodnight when the user is leaving or going to sleep. Most "
@@ -3879,7 +3909,8 @@ index 0000000..7f83c90
 +    "the people who come up most (first names and who they are), my current projects in a few words each, "
 +    "and how I like answers. Leave out health, money, addresses, phone numbers, passwords and anything "
 +    "private. Start with one line \"TZ: \" and my timezone as a POSIX TZ string, such as "
-+    "\"TZ: PST8PDT,M3.2.0,M11.1.0\". Answer with only that, no preamble.";
++    "\"TZ: PST8PDT,M3.2.0,M11.1.0\", then one line \"PLACE: \" with my city, region and two-letter country "
++    "code, such as \"PLACE: Austin, Texas, US\". Answer with only that, no preamble.";
 +
 +static const char ASK_MUSE_DESC[] =
 +    "Hand a question or request to Muse, the user's personal assistant, which knows and manages their "
@@ -3888,11 +3919,19 @@ index 0000000..7f83c90
 +
 +/* --- shared state (any task) ------------------------------------------------------- */
 +
++/* Whose live voice: set over serial, kept in NVS, read when a conversation opens. */
++typedef enum { LIVE_XAI, LIVE_GEMINI } provider_t;
++static _Atomic int s_prov = LIVE_XAI;
++static bool s_prov_loaded;
++#define PROV_NAME(p) ((p) == LIVE_GEMINI ? "Gemini" : "Grok")
++
 +static _Atomic uint32_t s_session;   /* bumped by open and close */
 +static atomic_bool s_want;
 +static _Atomic int s_state = MUSE_LIVE_OFF;
 +static char s_why[64];
-+static atomic_bool s_discard, s_playing;
++static atomic_bool s_discard, s_playing, s_stop;
++static _Atomic uint32_t s_played;         /* reply bytes the voice task has taken from the speaker buffer */
++static char *_Atomic s_typed;             /* ">live_ask=...": a question typed into the open conversation (testing) */
 +static _Atomic int s_beat_at;             /* muse_live_beat(): the voice loop's step, and when */
 +static _Atomic int64_t s_beat_us;
 +#define STALL_US (2 * 1000000LL)
@@ -3908,6 +3947,7 @@ index 0000000..7f83c90
 +static portMUX_TYPE s_profile_lock = portMUX_INITIALIZER_UNLOCKED;
 +static char s_profile[PROFILE_MAX];
 +static char s_tz[TZ_MAX];
++static char s_place[PLACE_MAX];      /* "City, Region, CC": web_search's location */
 +static uint32_t s_profile_at;        /* when it was fetched (time()), or 0 */
 +static uint8_t s_profile_typed;      /* set over serial: never replaced from Muse */
 +static bool s_profile_loaded;
@@ -3956,6 +3996,18 @@ index 0000000..7f83c90
 +static bool s_cancel_next;           /* barged in after asking for one: cancel it when it starts */
 +static bool s_drop;                  /* after a barge-in, until the next response starts */
 +static bool s_say_next;              /* Muse's answer went out: the next response is it being read */
++
++/* The caption: the words of the reply being heard, kept up with its audio. */
++static struct {
++    bool on;
++    bool muse;                  /* Muse's answer, read out: its words are all known at once */
++    bool done;                  /* all its audio has come */
++    const char *text;           /* s_out or s_said */
++    uint32_t base, rx;          /* s_rx when it started, and its bytes queued since */
++    int shown;                  /* bytes of text shown last time */
++} s_cap;
++static uint32_t s_rx;           /* reply bytes queued for the speaker, all responses */
++#define CAP_MUSE_CPS 14         /* Muse's answer before its audio has all come: about how fast it's said */
 +
 +/* Reply audio not yet in the speaker buffer: nothing more is read until it is. */
 +static uint8_t *s_pend;
@@ -4019,6 +4071,10 @@ index 0000000..7f83c90
 +    if (nvs_get_str(h, "tz", s_tz, &n) != ESP_OK) {
 +        s_tz[0] = '\0';
 +    }
++    n = sizeof(s_place);
++    if (nvs_get_str(h, "place", s_place, &n) != ESP_OK) {
++        s_place[0] = '\0';
++    }
 +    nvs_get_u32(h, "profile_at", &s_profile_at);
 +    nvs_get_u8(h, "typed", &s_profile_typed);
 +    nvs_close(h);
@@ -4031,6 +4087,7 @@ index 0000000..7f83c90
 +    if (err == ESP_OK) {
 +        err = nvs_set_str(h, "profile", s_profile);
 +        err = err ?: nvs_set_str(h, "tz", s_tz);
++        err = err ?: nvs_set_str(h, "place", s_place);
 +        err = err ?: nvs_set_u32(h, "profile_at", s_profile_at);
 +        err = err ?: nvs_set_u8(h, "typed", s_profile_typed);
 +        err = err ?: nvs_commit(h);
@@ -4044,20 +4101,31 @@ index 0000000..7f83c90
 +
 +/* Takes "TZ: ..." off the front of `text` into s_tz (if there), and the rest,
 + * trimmed, as the profile. Call with s_profile_lock held. */
++/* "KEY: value" at the start of `text` into out; returns past its line, or NULL if it isn't that key. */
++static const char *take_line(const char *text, const char *key, char *out, size_t cap)
++{
++    size_t k = strlen(key);
++    if (strncasecmp(text, key, k)) {
++        return NULL;
++    }
++    const char *v = text + k + strspn(text + k, " ");
++    size_t n = strcspn(v, "\n");
++    n = n < cap - 1 ? n : cap - 1;
++    memcpy(out, v, n);
++    out[n] = '\0';
++    while (n && out[n - 1] == ' ') {
++        out[--n] = '\0';
++    }
++    v += strcspn(v, "\n");
++    return v + strspn(v, " \n");
++}
++
 +static void set_profile(const char *text)
 +{
 +    text += strspn(text, " \n");
-+    if (!strncasecmp(text, "TZ:", 3)) {
-+        const char *tz = text + 3 + strspn(text + 3, " ");
-+        size_t n = strcspn(tz, "\n");
-+        n = n < TZ_MAX - 1 ? n : TZ_MAX - 1;
-+        memcpy(s_tz, tz, n);
-+        s_tz[n] = '\0';
-+        while (n && s_tz[n - 1] == ' ') {
-+            s_tz[--n] = '\0';
-+        }
-+        text = tz + strcspn(tz, "\n");
-+        text += strspn(text, " \n");
++    for (const char *next; (next = take_line(text, "TZ:", s_tz, sizeof(s_tz))) ||
++                           (next = take_line(text, "PLACE:", s_place, sizeof(s_place)));) {
++        text = next;
 +    }
 +    strlcpy(s_profile, text, sizeof(s_profile));
 +    size_t n = strlen(s_profile);
@@ -4066,16 +4134,61 @@ index 0000000..7f83c90
 +    }
 +}
 +
++static void load_provider(void)
++{
++    if (s_prov_loaded) {
++        return;
++    }
++    s_prov_loaded = true;
++    nvs_handle_t h;
++    uint8_t p = LIVE_XAI;
++    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
++        nvs_get_u8(h, "provider", &p);
++        nvs_close(h);
++    }
++    atomic_store(&s_prov, p == LIVE_GEMINI ? LIVE_GEMINI : LIVE_XAI);
++}
++
 +bool muse_live_console_command(const char *line)
 +{
++    if (strncmp(line, "live_provider=", 14) == 0) {
++        const char *v = line + 14;
++        int p = !strcmp(v, "gemini") ? LIVE_GEMINI : !strcmp(v, "xai") ? LIVE_XAI : -1;
++        if (p < 0) {
++            printf("@live_provider error (xai or gemini)\n");
++            fflush(stdout);
++            return true;
++        }
++        load_provider();
++        atomic_store(&s_prov, p);
++        nvs_handle_t h;
++        esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
++        if (err == ESP_OK) {
++            err = nvs_set_u8(h, "provider", (uint8_t)p);
++            err = err ?: nvs_commit(h);
++            nvs_close(h);
++        }
++        ESP_LOGI(TAG, "live voice: %s, from the next conversation", PROV_NAME(p));
++        printf(err == ESP_OK ? "@live_provider ok\n" : "@live_provider error storage\n");
++        fflush(stdout);
++        return true;
++    }
++    if (strncmp(line, "live_ask=", 9) == 0) {
++        /* For testing without talking: as if you'd said it, in the open conversation. */
++        char *q = strdup(line + 9);
++        free(atomic_exchange(&s_typed, q));
++        printf(atomic_load(&s_want) ? "@live_ask ok\n" : "@live_ask no conversation\n");
++        fflush(stdout);
++        return true;
++    }
 +    if (strcmp(line, "profile?") == 0) {
 +        load_profile();
 +        taskENTER_CRITICAL(&s_profile_lock);
 +        char tz[TZ_MAX];
 +        strlcpy(tz, s_tz, sizeof(tz));
 +        taskEXIT_CRITICAL(&s_profile_lock);
-+        printf("@profile tz=%s typed=%d at=%lu\n", tz[0] ? tz : "(none)", s_profile_typed,
-+               (unsigned long)s_profile_at);
++        printf("@profile tz=%s place=%s typed=%d at=%lu\n", tz[0] ? tz : "(none)", s_place[0] ? s_place : "(none)",
++               s_profile_typed, (unsigned long)s_profile_at);
 +        muse_hatch_console("profile", s_profile[0] ? s_profile : "(none)", NULL);
 +        return true;
 +    }
@@ -4093,7 +4206,7 @@ index 0000000..7f83c90
 +        set_profile(text);
 +        s_profile_typed = 1;
 +    } else {
-+        s_profile[0] = s_tz[0] = '\0';
++        s_profile[0] = s_tz[0] = s_place[0] = '\0';
 +        s_profile_typed = 0;
 +    }
 +    s_profile_at = (uint32_t)clock_now();
@@ -4181,10 +4294,17 @@ index 0000000..7f83c90
 +    if (s_profile[0]) {
 +        n += snprintf(out + n, cap - n,
 +                      "\nWhat you know about the user, a summary from Muse: it may be out of date, so ask Muse "
-+                      "about anything it doesn't cover or that may have changed, and anything live like the "
-+                      "weather, their calendar, tasks or messages.\n%s", s_profile);
++                      "about anything personal it doesn't cover or that may have changed, and anything live of "
++                      "theirs like their calendar, tasks or messages.\n%s", s_profile);
 +    }
++    char place[PLACE_MAX];
++    strlcpy(place, s_place, sizeof(place));
 +    taskEXIT_CRITICAL(&s_profile_lock);
++    if (place[0] && n < cap) {
++        n += snprintf(out + n, cap - n,
++                      "\nThe user is in %s. For the weather, the time and anything local, it's there unless they "
++                      "name another place: never ask where they are.", place);
++    }
 +    if (now[0] && n < cap) {
 +        n += snprintf(out + n, cap - n, "\nIt is %s%s.", now, utc ? " UTC (their timezone isn't known)" : ", their local time");
 +    }
@@ -4198,8 +4318,8 @@ index 0000000..7f83c90
 +    if (s_profile_typed) {
 +        return false;
 +    }
-+    if (!s_profile[0]) {
-+        return true;
++    if (!s_profile[0] || !s_place[0]) {
++        return true;   /* none yet, or from before the place was asked for */
 +    }
 +    uint32_t now = (uint32_t)clock_now();
 +    return now > CLOCK_SET_AFTER && (s_profile_at < CLOCK_SET_AFTER || now - s_profile_at > PROFILE_AGE_S);
@@ -4213,11 +4333,16 @@ index 0000000..7f83c90
 +    }
 +    muse_hatch_strip_tags(clean, clean, strlen(clean) + 1, NULL);   /* no faces or speech tags in it */
 +    taskENTER_CRITICAL(&s_profile_lock);
-+    char was_tz[TZ_MAX];
++    char was_tz[TZ_MAX], was_place[PLACE_MAX];
 +    strlcpy(was_tz, s_tz, sizeof(was_tz));
++    strlcpy(was_place, s_place, sizeof(was_place));
++    s_tz[0] = s_place[0] = '\0';
 +    set_profile(clean);
 +    if (!s_tz[0]) {
 +        strlcpy(s_tz, was_tz, sizeof(s_tz));
++    }
++    if (!s_place[0]) {
++        strlcpy(s_place, was_place, sizeof(s_place));
 +    }
 +    size_t n = strlen(s_profile);
 +    s_profile_at = (uint32_t)clock_now();
@@ -4228,7 +4353,8 @@ index 0000000..7f83c90
 +        return;
 +    }
 +    save_profile();
-+    ESP_LOGI(TAG, "profile from Muse kept (%u chars, TZ %s)", (unsigned)n, s_tz[0] ? s_tz : "unknown");
++    ESP_LOGI(TAG, "profile from Muse kept (%u chars, TZ %s, place %s)", (unsigned)n, s_tz[0] ? s_tz : "unknown",
++             s_place[0] ? s_place : "unknown");
 +}
 +
 +/* --- sending ------------------------------------------------------------------------- */
@@ -4270,9 +4396,16 @@ index 0000000..7f83c90
 +    return t;
 +}
 +
++static bool gemini_configure(void);
++static void gemini_reset(void);
++static void gemini_typed(const char *text);
++
 +/* The session: who Grok is, its tools, xAI's voice detection, and 16 kHz PCM both ways. */
 +static bool configure(void)
 +{
++    if (atomic_load(&s_prov) == LIVE_GEMINI) {
++        return gemini_configure();
++    }
 +    static const char *MOODS[] = { "joy", "thinking", "sad", "goodnight", NULL };
 +    size_t n = sizeof(PERSONA) + sizeof(INSTRUCTIONS) + PROFILE_MAX + 512;
 +    char *instructions = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -4288,8 +4421,8 @@ index 0000000..7f83c90
 +    cJSON_AddStringToObject(s, "instructions", instructions);
 +    free(instructions);
 +    cJSON_AddStringToObject(cJSON_AddObjectToObject(s, "turn_detection"), "type", "server_vad");
-+    /* No reasoning pass: a spoken reply that starts sooner (Muse does the deep thinking). */
-+    cJSON_AddStringToObject(cJSON_AddObjectToObject(s, "reasoning"), "effort", "none");
++    /* reasoning.effort stays at xAI's default (high): with "none" the model says its
++     * tool calls out loud ("<ask_muse>...</ask_muse>") instead of making them. */
 +    cJSON *audio = cJSON_AddObjectToObject(s, "audio");
 +    /* In as 8 kHz mu-law (to_ulaw()), out as 16 kHz PCM, the speaker's own; both as
 +     * binary frames, which spares base64 (a third more bytes) and JSON both ways. */
@@ -4313,11 +4446,35 @@ index 0000000..7f83c90
 +                                     "The question or request, self-contained, in the user's words.", NULL));
 +    cJSON_AddItemToArray(tools, tool("set_mood", "Show a mood on the user's screen (it never needs mentioning).",
 +                                     "mood", NULL, MOODS));
++    /* xAI's own web search, run on its side, near the user if the profile says where they are. */
++    cJSON *search = cJSON_CreateObject();
++    cJSON_AddStringToObject(search, "type", "web_search");
++    char place[PLACE_MAX];
++    taskENTER_CRITICAL(&s_profile_lock);
++    strlcpy(place, s_place, sizeof(place));
++    taskEXIT_CRITICAL(&s_profile_lock);
++    if (place[0]) {
++        /* "City, Region, CC" */
++        cJSON *loc = cJSON_AddObjectToObject(search, "location");
++        static const char *KEYS[] = { "city", "region", "country" };
++        char *save = NULL;
++        int k = 0;
++        for (char *part = strtok_r(place, ",", &save); part && k < 3; part = strtok_r(NULL, ",", &save), k++) {
++            cJSON_AddStringToObject(loc, KEYS[k], part + strspn(part, " "));
++        }
++    }
++    cJSON_AddItemToArray(tools, search);
 +    return send_json(msg);
 +}
 +
++static void gemini_output(const char *call_id, const char *key, const char *value, const char *note);
++
 +static void output(const char *call_id, const char *key, const char *value)
 +{
++    if (atomic_load(&s_prov) == LIVE_GEMINI) {
++        gemini_output(call_id, key, value, NULL);
++        return;
++    }
 +    cJSON *out = cJSON_CreateObject();
 +    cJSON_AddStringToObject(out, key, value);
 +    char *json = cJSON_PrintUnformatted(out);
@@ -4341,7 +4498,9 @@ index 0000000..7f83c90
 +static void create_response(void)
 +{
 +    await_response();
-+    send_raw("{\"type\":\"response.create\"}");
++    if (atomic_load(&s_prov) == LIVE_XAI) {
++        send_raw("{\"type\":\"response.create\"}");
++    }   /* Gemini goes on by itself once it has a tool's result */
 +}
 +
 +/* Says `text` word for word in Grok's voice (xAI's force_message: no model involved). */
@@ -4398,6 +4557,8 @@ index 0000000..7f83c90
 +    return o;
 +}
 +
++static bool gemini_send_mic(const uint8_t *pcm, size_t bytes);
++
 +/* Up to 100 ms of mic per append, once the session is set up. */
 +static void send_mic(void)
 +{
@@ -4419,10 +4580,17 @@ index 0000000..7f83c90
 +        if (!n) {
 +            return;
 +        }
-+        /* As a binary frame of raw mu-law (the session's input transport): no base64, no JSON. */
-+        size_t coded = to_ulaw(s_mic_pcm, n, s_mic_ulaw);
-+        if (!muse_ws_send_binary(s_ws, s_mic_ulaw, coded)) {
-+            return;
++        if (atomic_load(&s_prov) == LIVE_GEMINI) {
++            /* Gemini: 8 kHz PCM (it takes any rate), base64 in JSON, the only way it takes audio. */
++            if (!gemini_send_mic(s_mic_pcm, n)) {
++                return;
++            }
++        } else {
++            /* As a binary frame of raw mu-law (the session's input transport): no base64, no JSON. */
++            size_t coded = to_ulaw(s_mic_pcm, n, s_mic_ulaw);
++            if (!muse_ws_send_binary(s_ws, s_mic_ulaw, coded)) {
++                return;
++            }
 +        }
 +        s_mic_sent_us = now_us();
 +        s_mic_bytes += n;
@@ -4435,7 +4603,7 @@ index 0000000..7f83c90
 +            s_mic_n++;
 +        }
 +        if (s_mic_sent_us - s_mic_log_us > 5000000) {
-+            ESP_LOGI(TAG, "mic to xAI: %.1fs so far (%.1fs dropped behind); last 5 s peak %.0f dBFS, rms %.0f dBFS, %u samples clipped",
++            ESP_LOGI(TAG, "mic to the live voice: %.1fs so far (%.1fs dropped behind); last 5 s peak %.0f dBFS, rms %.0f dBFS, %u samples clipped",
 +                     (double)s_mic_bytes / 2 / RATE, (double)s_mic_dropped / 2 / RATE,
 +                     20.0 * log10((s_mic_peak + 1) / 32768.0),
 +                     10.0 * log10(s_mic_sq / (s_mic_n ? s_mic_n : 1) / (32768.0 * 32768.0) + 1e-10),
@@ -4459,7 +4627,9 @@ index 0000000..7f83c90
 +    if (s_drop) {
 +        s_pend_off = s_pend_len;
 +    }
-+    s_pend_off += xStreamBufferSend(s_speaker, s_pend + s_pend_off, s_pend_len - s_pend_off, 0);
++    size_t sent = xStreamBufferSend(s_speaker, s_pend + s_pend_off, s_pend_len - s_pend_off, 0);
++    s_pend_off += sent;
++    s_rx += sent;
 +    if (s_pend_off >= s_pend_len) {
 +        free(s_pend);
 +        s_pend = NULL;
@@ -4476,10 +4646,8 @@ index 0000000..7f83c90
 +    }
 +    if (!r.audio) {
 +        r.audio = true;
-+        if (r.from_muse) {
-+            muse_hatch_caption_at(s_said, strlen(s_said), s_page, sizeof(s_page));
-+            muse_state_set_caption("%s", s_page);
-+        }
++        s_cap = (typeof(s_cap)){ .on = true, .muse = r.from_muse, .text = r.from_muse ? s_said : s_out,
++                                 .base = s_rx + (uint32_t)(s_pend ? s_pend_len - s_pend_off : 0), .shown = -1 };
 +    }
 +    n &= ~(size_t)1;
 +    if (s_pend) {
@@ -4505,9 +4673,17 @@ index 0000000..7f83c90
 +}
 +
 +/* The reply's audio as binary frames (the session asks for them): raw PCM. */
++static void gemini_on_message(char *msg, size_t len);
++
 +static void on_binary(uint8_t *data, size_t len, void *ctx)
 +{
 +    (void)ctx;
++    if (atomic_load(&s_prov) == LIVE_GEMINI) {
++        /* Gemini's events are JSON, sent as binary frames */
++        data[len < MSG_MAX ? len : MSG_MAX - 1] = '\0';
++        gemini_on_message((char *)data, len);
++        return;
++    }
 +    if (s_drop || !r.active || r.cancelled || len < 2) {
 +        return;
 +    }
@@ -4725,11 +4901,21 @@ index 0000000..7f83c90
 +}
 +
 +/* Hands Muse's answer to Grok when nobody is talking and nothing is playing. */
++static void clear_response(void);
++
 +static void deliver(void)
 +{
-+    if (!s_deliver.pending || atomic_load(&s_you) || r.active || s_awaiting || s_pend ||
-+        atomic_load(&s_playing) || !xStreamBufferIsEmpty(s_speaker)) {
++    bool gemini = atomic_load(&s_prov) == LIVE_GEMINI;
++    /* Gemini's turn stays open until it has the tool's result (its calls block), so there it
++     * only waits for the speaker to finish what it was saying; xAI's turn is over by now. */
++    bool busy = gemini ? false : atomic_load(&s_you) || r.active || s_awaiting;
++    if (!s_deliver.pending || busy || s_pend || atomic_load(&s_playing) || !xStreamBufferIsEmpty(s_speaker)) {
 +        return;
++    }
++    if (gemini) {
++        clear_response();   /* what comes next is Muse's answer, said: a response of its own */
++        s_drop = false;
++        atomic_store(&s_you, false);
 +    }
 +    s_deliver.pending = false;
 +    if (s_deliver.error) {
@@ -4743,8 +4929,16 @@ index 0000000..7f83c90
 +    muse_hatch_take_faces(s_deliver.text, strlen(s_deliver.text));
 +    size_t n = muse_hatch_strip_tags(s_deliver.text, s_deliver.text, ANSWER_MAX, NULL);
 +    muse_hatch_speakable(s_deliver.text, n, s_said);
-+    output(s_deliver.call_id, "answer", s_said);
-+    say(s_said);
++    if (atomic_load(&s_prov) == LIVE_GEMINI) {
++        /* No verbatim speech on Gemini: the answer goes back as the tool's result, to be said as it is. */
++        gemini_output(s_deliver.call_id, "answer", s_said,
++                      "Say this answer to the user now, word for word, adding nothing before or after it.");
++        await_response();
++        s_say_next = true;
++    } else {
++        output(s_deliver.call_id, "answer", s_said);
++        say(s_said);
++    }
 +    ESP_LOGI(TAG, "reading Muse's answer: \"%.200s\"", s_said);
 +}
 +
@@ -4876,6 +5070,10 @@ index 0000000..7f83c90
 +static void on_text(char *msg, size_t len, void *ctx)
 +{
 +    (void)ctx;
++    if (atomic_load(&s_prov) == LIVE_GEMINI) {
++        gemini_on_message(msg, len);
++        return;
++    }
 +    if (strstr(msg, "\"type\":\"response.output_audio.delta\"") || strstr(msg, "\"type\":\"response.audio.delta\"")) {
 +        on_audio(msg);
 +        return;
@@ -4896,13 +5094,11 @@ index 0000000..7f83c90
 +            size_t n = strlen(d) < OUT_TEXT_MAX - 1 - s_out_len ? strlen(d) : OUT_TEXT_MAX - 1 - s_out_len;
 +            memcpy(s_out + s_out_len, d, n);
 +            s_out_len += n;
-+            s_out[s_out_len] = '\0';
-+            muse_hatch_caption_at(s_out, s_out_len, s_page, sizeof(s_page));
-+            muse_state_set_caption("%s", s_page);
++            s_out[s_out_len] = '\0';   /* shown as it's said: caption_tick() */
 +        }
 +    } else if (!strcmp(t, "response.output_audio_transcript.done") || !strcmp(t, "response.audio_transcript.done")) {
 +        if (!r.from_muse && s_out_len) {
-+            ESP_LOGI(TAG, "grok: \"%.300s\"", s_out);
++            ESP_LOGI(TAG, "%s: \"%.300s\"", PROV_NAME(atomic_load(&s_prov)), s_out);
 +        }
 +    } else if (!strcmp(t, "conversation.item.input_audio_transcription.completed")) {
 +        ESP_LOGI(TAG, "you: \"%.300s\"", cJSON_GetStringValue(cJSON_GetObjectItem(ev, "transcript")) ?: "");
@@ -4950,11 +5146,343 @@ index 0000000..7f83c90
 +    cJSON_Delete(ev);
 +}
 +
++/* --- Gemini Live ----------------------------------------------------------------------------------
++ *
++ * The same conversation through Google's Gemini Live API (BidiGenerateContent):
++ * its events are mapped onto the ones above. What differs: audio goes up as
++ * base64 PCM in JSON (8 kHz here) and comes down at 24 kHz (resampled to the
++ * speaker's 16 kHz); a tool call blocks the model until its result comes back
++ * (gemini-3.1-flash-live-preview calls tools only that way), and there's no
++ * verbatim speech, so Muse's answer goes back as the tool's result for Gemini
++ * to say. An interruption is serverContent.interrupted; your words come as
++ * inputTranscription, which during a maybe-barge-in is xAI's speech_started. */
++
++static muse_resample_t s_rs;
++static struct {
++    char id[ID_MAX];
++    char name[16];
++} s_gcalls[CALLS_MAX];                /* recent tool calls: a result must name its call */
++static int s_gcall_next;
++EXT_RAM_BSS_ATTR static char s_heard[512];   /* what you said this turn, for the log */
++EXT_RAM_BSS_ATTR static int16_t s_gem_in[MIC_SEND / 4];
++EXT_RAM_BSS_ATTR static char s_gem_append[128 + (MIC_SEND / 2 + 2) / 3 * 4];
++
++static void gemini_reset(void)
++{
++    muse_resample_init(&s_rs);
++    memset(s_gcalls, 0, sizeof(s_gcalls));
++    s_heard[0] = '\0';
++}
++
++static cJSON *gemini_function(const char *name, const char *desc, const char *arg, const char *arg_desc,
++                              const char **choices)
++{
++    cJSON *f = cJSON_CreateObject();
++    cJSON_AddStringToObject(f, "name", name);
++    cJSON_AddStringToObject(f, "description", desc);
++    cJSON *params = cJSON_AddObjectToObject(f, "parameters");
++    cJSON_AddStringToObject(params, "type", "OBJECT");
++    cJSON *a = cJSON_AddObjectToObject(cJSON_AddObjectToObject(params, "properties"), arg);
++    cJSON_AddStringToObject(a, "type", "STRING");
++    if (arg_desc) {
++        cJSON_AddStringToObject(a, "description", arg_desc);
++    }
++    if (choices) {
++        cJSON *e = cJSON_AddArrayToObject(a, "enum");
++        for (; *choices; choices++) {
++            cJSON_AddItemToArray(e, cJSON_CreateString(*choices));
++        }
++    }
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(params, "required"), cJSON_CreateString(arg));
++    return f;
++}
++
++/* Every `from` in `text` becomes `to`, in place (`text` has room for it to grow). */
++static void replace_all(char *text, const char *from, const char *to)
++{
++    size_t fl = strlen(from), tl = strlen(to);
++    for (char *at = strstr(text, from); at; at = strstr(at + tl, from)) {
++        memmove(at + tl, at + fl, strlen(at + fl) + 1);
++        memcpy(at, to, tl);
++    }
++}
++
++/* The instructions as Gemini needs them: its search is Google Search, and as its tool
++ * calls block, anything it says "first" comes out after the answer: it says nothing,
++ * and the watch shows Muse's logo with a spinner while Muse works. */
++static void gemini_words(char *text)
++{
++    replace_all(text, "web_search", "Google Search");
++    replace_all(text, "say only \"Let me check with Muse.\" first, and nothing after it",
++                "say nothing at all, before or after it (the screen shows you're checking)");
++}
++
++/* The setup: who it is (persona, rules, what it knows of you), its voice, its tools
++ * (Muse, moods, Google Search) and both transcripts, for the captions and the log. */
++static bool gemini_configure(void)
++{
++    static const char *MOODS[] = { "joy", "thinking", "sad", "goodnight", NULL };
++    size_t n = sizeof(PERSONA) + sizeof(INSTRUCTIONS) + PROFILE_MAX + 768;
++    char *instructions = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!instructions) {
++        return false;
++    }
++    size_t o = snprintf(instructions, n, "%s%s", PERSONA, INSTRUCTIONS);
++    about_you(instructions + o, n - o - 64);
++    gemini_words(instructions);
++    cJSON *msg = cJSON_CreateObject();
++    cJSON *setup = cJSON_AddObjectToObject(msg, "setup");
++    cJSON_AddStringToObject(setup, "model", GEMINI_MODEL);
++    cJSON *gen = cJSON_AddObjectToObject(setup, "generationConfig");
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(gen, "responseModalities"), cJSON_CreateString("AUDIO"));
++    cJSON_AddStringToObject(cJSON_AddObjectToObject(cJSON_AddObjectToObject(cJSON_AddObjectToObject(gen, "speechConfig"),
++                                                                            "voiceConfig"),
++                                                    "prebuiltVoiceConfig"),
++                            "voiceName", GEMINI_VOICE);
++    cJSON *part = cJSON_CreateObject();
++    cJSON_AddStringToObject(part, "text", instructions);
++    free(instructions);
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(cJSON_AddObjectToObject(setup, "systemInstruction"), "parts"), part);
++    cJSON *tools = cJSON_AddArrayToObject(setup, "tools");
++    cJSON *fns = cJSON_CreateObject();
++    cJSON *decls = cJSON_AddArrayToObject(fns, "functionDeclarations");
++    cJSON_AddItemToArray(decls, gemini_function("ask_muse", ASK_MUSE_DESC, "question",
++                                                "The question or request for Muse, self-contained, in the user's words.",
++                                                NULL));
++    cJSON_AddItemToArray(decls, gemini_function("set_mood", "Show a mood on the user's screen (it never needs mentioning).",
++                                                "mood", NULL, MOODS));
++    cJSON_AddItemToArray(tools, fns);
++    cJSON *search = cJSON_CreateObject();
++    cJSON_AddObjectToObject(search, "googleSearch");
++    cJSON_AddItemToArray(tools, search);
++    cJSON_AddObjectToObject(setup, "inputAudioTranscription");
++    cJSON_AddObjectToObject(setup, "outputAudioTranscription");
++    cJSON_AddObjectToObject(cJSON_AddObjectToObject(setup, "contextWindowCompression"), "slidingWindow");
++    return send_json(msg);
++}
++
++/* A tool's result (`note`: what to do with it, or NULL). */
++static void gemini_output(const char *call_id, const char *key, const char *value, const char *note)
++{
++    const char *name = "";
++    for (int i = 0; i < CALLS_MAX; i++) {
++        if (!strcmp(s_gcalls[i].id, call_id)) {
++            name = s_gcalls[i].name;
++        }
++    }
++    cJSON *msg = cJSON_CreateObject();
++    cJSON *fr = cJSON_CreateObject();
++    cJSON_AddStringToObject(fr, "id", call_id);
++    cJSON_AddStringToObject(fr, "name", name);
++    cJSON *resp = cJSON_AddObjectToObject(fr, "response");
++    cJSON_AddStringToObject(resp, key, value);
++    if (note) {
++        cJSON_AddStringToObject(resp, "note", note);
++    }
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(cJSON_AddObjectToObject(msg, "toolResponse"), "functionResponses"), fr);
++    send_json(msg);
++}
++
++/* 16 kHz PCM to 8 kHz (the (1 2 1)/4 filter, every other sample), as base64 PCM in JSON. */
++static bool gemini_send_mic(const uint8_t *pcm, size_t bytes)
++{
++    size_t n = bytes / 2, o = 0;
++    for (size_t i = 0; i + 1 < n; i += 2) {
++        int16_t a = (int16_t)(pcm[2 * i] | pcm[2 * i + 1] << 8);
++        int16_t b = (int16_t)(pcm[2 * i + 2] | pcm[2 * i + 3] << 8);
++        s_gem_in[o++] = (int16_t)((s_mic_prev + 2 * a + b) / 4);
++        s_mic_prev = b;
++    }
++    static const char head[] = "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=8000\",\"data\":\"";
++    memcpy(s_gem_append, head, sizeof(head) - 1);
++    size_t b64 = 0;
++    mbedtls_base64_encode((unsigned char *)s_gem_append + sizeof(head) - 1, sizeof(s_gem_append) - sizeof(head) - 4,
++                          &b64, (const unsigned char *)s_gem_in, o * 2);
++    size_t len = sizeof(head) - 1 + b64;
++    memcpy(s_gem_append + len, "\"}}}", 4);
++    len += 4;
++    return muse_ws_send_text(s_ws, s_gem_append, len);
++}
++
++static void gemini_typed(const char *text)
++{
++    cJSON *msg = cJSON_CreateObject();
++    cJSON *cc = cJSON_AddObjectToObject(msg, "clientContent");
++    cJSON *turn = cJSON_CreateObject();
++    cJSON_AddStringToObject(turn, "role", "user");
++    cJSON *part = cJSON_CreateObject();
++    cJSON_AddStringToObject(part, "text", text);
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(turn, "parts"), part);
++    cJSON_AddItemToArray(cJSON_AddArrayToObject(cc, "turns"), turn);
++    cJSON_AddBoolToObject(cc, "turnComplete", true);
++    await_response();
++    send_json(msg);
++}
++
++/* Its turn has begun (its first words or sound). */
++static void gemini_begin(void)
++{
++    if (r.active || s_drop) {
++        return;
++    }
++    clear_response();
++    r.active = true;
++    r.from_muse = s_say_next;
++    s_say_next = false;
++    s_awaiting = false;
++    s_out_len = 0;
++    s_out[0] = '\0';
++    atomic_store(&s_you, false);
++    atomic_store(&s_who, r.from_muse ? MUSE_RESPONDER_MUSE : MUSE_RESPONDER_GEMINI);
++}
++
++static void gemini_audio(const char *b64)
++{
++    size_t in = strlen(b64), n = 0;
++    size_t cap = in / 4 * 3 + 3;
++    uint8_t *raw = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!raw) {
++        return;
++    }
++    if (mbedtls_base64_decode(raw, cap, &n, (const unsigned char *)b64, in) != 0) {
++        free(raw);
++        return;
++    }
++    size_t samples = n / 2;
++    int16_t *pcm = heap_caps_malloc((samples * 2 / 3 + 4) * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!pcm) {
++        free(raw);
++        return;
++    }
++    size_t m = muse_resample_24k_16k(&s_rs, (const int16_t *)raw, samples, pcm);
++    free(raw);
++    take_pcm((uint8_t *)pcm, m * sizeof(int16_t));
++}
++
++static void gemini_server_content(const cJSON *sc)
++{
++    if (cJSON_IsTrue(cJSON_GetObjectItem(sc, "interrupted"))) {
++        barge_in("Gemini heard you");
++        s_drop = true;   /* until its turn is over */
++    }
++    const char *heard = cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(sc, "inputTranscription"), "text"));
++    if (heard && heard[0]) {
++        /* Its transcript of you comes late, often once its answer has begun: it's never a
++         * barge-in (the mic doesn't go to Gemini while it speaks; serverContent.interrupted is). */
++        strlcat(s_heard, heard, sizeof(s_heard));
++        if (!r.active) {
++            atomic_store(&s_you, true);
++            await_response();
++        }
++    }
++    const cJSON *part;
++    cJSON_ArrayForEach(part, cJSON_GetObjectItem(cJSON_GetObjectItem(sc, "modelTurn"), "parts"))
++    {
++        const char *data = cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(part, "inlineData"), "data"));
++        if (data && !s_drop) {
++            gemini_begin();
++            gemini_audio(data);
++        }
++    }
++    const char *said = cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(sc, "outputTranscription"), "text"));
++    if (said && !s_drop) {
++        gemini_begin();
++        if (!r.from_muse) {
++            size_t n = strlen(said) < OUT_TEXT_MAX - 1 - s_out_len ? strlen(said) : OUT_TEXT_MAX - 1 - s_out_len;
++            memcpy(s_out + s_out_len, said, n);
++            s_out_len += n;
++            s_out[s_out_len] = '\0';
++        }
++    }
++    if (cJSON_IsTrue(cJSON_GetObjectItem(sc, "turnComplete"))) {
++        if (s_heard[0]) {
++            ESP_LOGI(TAG, "you: \"%.300s\"", s_heard);
++            s_heard[0] = '\0';
++        }
++        if (r.active) {
++            ESP_LOGI(TAG, "Gemini%s: \"%.300s\"", r.from_muse ? " (Muse's answer)" : "", r.from_muse ? s_said : s_out);
++        }
++        clear_response();
++        s_drop = false;
++        s_awaiting = false;
++        atomic_store(&s_you, false);
++    }
++}
++
++static void gemini_tool_call(const cJSON *tc)
++{
++    const cJSON *fc;
++    cJSON_ArrayForEach(fc, cJSON_GetObjectItem(tc, "functionCalls"))
++    {
++        const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(fc, "id")) ?: "";
++        const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(fc, "name")) ?: "";
++        const cJSON *args = cJSON_GetObjectItem(fc, "args");
++        strlcpy(s_gcalls[s_gcall_next].id, id, ID_MAX);
++        strlcpy(s_gcalls[s_gcall_next].name, name, sizeof(s_gcalls[0].name));
++        s_gcall_next = (s_gcall_next + 1) % CALLS_MAX;
++        char *a = args ? cJSON_PrintUnformatted(args) : NULL;
++        ESP_LOGI(TAG, "Gemini called %s %.200s", name, a ? a : "");
++        if (!strcmp(name, "set_mood")) {
++            set_mood(a);
++            gemini_output(id, "result", "ok", NULL);
++        } else if (!strcmp(name, "ask_muse")) {
++            ask_muse(id, cJSON_GetStringValue(cJSON_GetObjectItem(args, "question")) ?: "");
++        } else {
++            gemini_output(id, "error", "unknown tool", NULL);
++        }
++        cJSON_free(a);
++    }
++}
++
++static void gemini_on_message(char *msg, size_t len)
++{
++    cJSON *ev = cJSON_ParseWithLength(msg, len);
++    if (!ev) {
++        ESP_LOGW(TAG, "unparsable message (%u bytes)", (unsigned)len);
++        return;
++    }
++    if (++s_events <= 6) {
++        const cJSON *first = ev->child;
++        ESP_LOGI(TAG, "Gemini event %d: %s", s_events, first && first->string ? first->string : "?");
++    }
++    const cJSON *sc = cJSON_GetObjectItem(ev, "serverContent");
++    const cJSON *tc = cJSON_GetObjectItem(ev, "toolCall");
++    const cJSON *cancel = cJSON_GetObjectItem(ev, "toolCallCancellation");
++    const cJSON *away = cJSON_GetObjectItem(ev, "goAway");
++    if (cJSON_GetObjectItem(ev, "setupComplete") && atomic_load(&s_state) == MUSE_LIVE_CONNECTING) {
++        s_ready_us = now_us();
++        ESP_LOGI(TAG, "session set up in %d ms", (int)((s_ready_us - s_setup_t0) / 1000));
++        atomic_store(&s_state, MUSE_LIVE_READY);
++    }
++    if (sc) {
++        gemini_server_content(sc);
++    }
++    if (tc) {
++        gemini_tool_call(tc);
++    }
++    const cJSON *id;
++    cJSON_ArrayForEach(id, cJSON_GetObjectItem(cancel, "ids"))
++    {
++        if (s_ask.active && !strcmp(cJSON_GetStringValue(id) ?: "", s_ask.call_id)) {
++            ESP_LOGI(TAG, "Gemini dropped its question to Muse");
++            muse_hatch_text_cancel();
++            s_ask.active = false;
++            atomic_store(&s_asking, false);
++        }
++    }
++    if (away) {
++        ESP_LOGW(TAG, "Gemini will close the connection in %s",
++                 cJSON_GetStringValue(cJSON_GetObjectItem(away, "timeLeft")) ?: "?");
++    }
++    cJSON_Delete(ev);
++}
++
 +/* --- the session ------------------------------------------------------------------------------ */
 +
 +static void forget(void)
 +{
 +    clear_response();
++    s_cap.on = false;
 +    s_awaiting = s_cancel_next = s_drop = s_say_next = false;
 +    free(s_pend);
 +    s_pend = NULL;
@@ -5020,18 +5548,31 @@ index 0000000..7f83c90
 +        fail("NO WI-FI");
 +        return false;
 +    }
-+    if (!muse_xai_tts_key(s_key, sizeof(s_key))) {
-+        fail("SET AN XAI KEY");
++    bool gemini = atomic_load(&s_prov) == LIVE_GEMINI;
++    if (!(gemini ? muse_gemini_tts_key(s_key, sizeof(s_key)) : muse_xai_tts_key(s_key, sizeof(s_key)))) {
++        fail(muse_live_no_key());
 +        return false;
 +    }
 +    radio_awake(true);
 +    int status;
-+    bool ok = muse_ws_open(s_ws, HOST, PATH, s_key, &status);
++    bool ok;
++    if (gemini) {
++        /* Gemini takes its key in the URL, not a header: the path is wiped after, like the key. */
++        static char path[sizeof(GEMINI_PATH) + KEY_MAX];
++        snprintf(path, sizeof(path), "%s%s", GEMINI_PATH, s_key);
++        ok = muse_ws_open(s_ws, GEMINI_HOST, path, NULL, &status);
++        memset(path, 0, sizeof(path));
++        gemini_reset();
++    } else {
++        ok = muse_ws_open(s_ws, HOST, PATH, s_key, &status);
++    }
 +    memset(s_key, 0, sizeof(s_key));
 +    if (!ok) {
-+        fail(status == 401 || status == 403 ? "XAI KEY REFUSED" : "CAN'T REACH XAI");
++        fail(status == 401 || status == 403 || status == 400 ? (gemini ? "GEMINI KEY REFUSED" : "XAI KEY REFUSED")
++                                                           : (gemini ? "CAN'T REACH GEMINI" : "CAN'T REACH XAI"));
 +        return false;
 +    }
++    ESP_LOGI(TAG, "live voice: %s", PROV_NAME(gemini));
 +    set_clock();
 +    muse_wifi_status_t w;
 +    muse_wifi_status(&w);
@@ -5052,6 +5593,126 @@ index 0000000..7f83c90
 +    return true;
 +}
 +
++/* Takes out what's markup, not words: a tool call the model wrote out
++ * ("<ask_muse>...</ask_muse>", all of it) and any other <tag>. An unclosed
++ * one at the end, and all after it, is cut (the rest hasn't come). For a copy
++ * of the text: returns the new length. */
++static size_t strip_markup(char *s)
++{
++    size_t o = 0;
++    for (size_t i = 0; s[i];) {
++        if (s[i] != '<') {
++            s[o++] = s[i++];
++            continue;
++        }
++        char *close = strchr(s + i, '>');
++        if (!close) {
++            break;   /* the tag isn't all here yet */
++        }
++        if (!strncmp(s + i, "<ask_muse", 9) || !strncmp(s + i, "<set_mood", 9)) {
++            char end[24];
++            snprintf(end, sizeof(end), "</%.*s>", 8, s + i + 1);
++            char *e = strstr(close, end);
++            if (!e) {
++                break;   /* its closing tag isn't here yet */
++            }
++            close = e + strlen(end) - 1;
++        }
++        i = close - s + 1;
++    }
++    s[o] = '\0';
++    return o;
++}
++
++/* The last `lines` lines of `text`'s first `len` bytes, wrapped at `cols`
++ * letters by words, into out (lines joined by '\n'). */
++static void tail_lines(const char *text, size_t len, int cols, int lines, char *out, size_t cap)
++{
++    size_t starts[64];
++    int n = 0;
++    size_t line = 0;
++    while (line < len && n < 64) {
++        starts[n++] = line;
++        size_t end = line + (size_t)cols;
++        if (end >= len) {
++            break;
++        }
++        size_t cut = end;
++        while (cut > line && text[cut] != ' ') {
++            cut--;
++        }
++        line = cut > line ? cut + 1 : end;   /* a word longer than the line is cut */
++    }
++    size_t from = n > lines ? starts[n - lines] : 0;
++    size_t o = 0;
++    for (int i = n > lines ? n - lines : 0; i < n && o + 1 < cap; i++) {
++        size_t a = starts[i], b = i + 1 < n ? starts[i + 1] : len;
++        while (b > a && text[b - 1] == ' ') {
++            b--;
++        }
++        if (o) {
++            out[o++] = '\n';
++        }
++        size_t k = b - a < cap - 1 - o ? b - a : cap - 1 - o;
++        memcpy(out + o, text + a, k);
++        o += k;
++    }
++    (void)from;
++    out[o] = '\0';
++}
++
++/* Moves the caption on with the reply's audio: as far into the words as the
++ * audio played is into what's come (a guess at the speaking rate for Muse's
++ * answer until its audio has all come), the last few lines up to there. */
++static void caption_tick(void)
++{
++    if (!s_cap.on) {
++        return;
++    }
++    s_cap.rx = s_rx + (uint32_t)(s_pend ? s_pend_len - s_pend_off : 0) - s_cap.base;
++    if (!r.active || !r.audio) {
++        s_cap.done = true;
++    }
++    uint32_t played = atomic_load(&s_played) - s_cap.base;
++    if ((int32_t)played < 0) {
++        played = 0;
++    }
++    static char clean[OUT_TEXT_MAX > ANSWER_MAX ? OUT_TEXT_MAX : ANSWER_MAX];
++    strlcpy(clean, s_cap.text, sizeof(clean));
++    size_t len = strip_markup(clean);
++    const char *text = clean;
++    size_t at;
++    if (s_cap.muse && !s_cap.done) {
++        at = (size_t)played / 2 * CAP_MUSE_CPS / RATE;
++    } else {
++        at = s_cap.rx ? (size_t)((uint64_t)len * (played < s_cap.rx ? played : s_cap.rx) / s_cap.rx) : 0;
++    }
++    at = at < len ? at : len;
++    while (at < len && at && text[at - 1] != ' ') {
++        at++;   /* to the end of the word being said */
++    }
++    if (!atomic_load(&s_playing)) {
++        /* Only while it's heard: after, the screen has gone back to listening, and the words
++         * would land in the status line and stay there. */
++        if (s_cap.done && played >= s_cap.rx) {
++            s_cap.on = false;
++        }
++        return;
++    }
++    if ((int)at != s_cap.shown) {
++        s_cap.shown = (int)at;
++        int cols, lines;
++        muse_state_page(false, &cols, &lines);
++        tail_lines(text, at, cols > 4 ? cols - 1 : 20, lines > 0 ? lines : 3, s_page, sizeof(s_page));
++        if (s_page[0]) {
++            muse_state_set_caption("%s", s_page);
++        }
++    }
++    if (s_cap.done && played >= s_cap.rx) {
++        s_cap.on = false;   /* all said */
++    }
++}
++
 +/* The voice loop stopped coming round: say where, once. */
 +static void watch_voice(void)
 +{
@@ -5067,6 +5728,7 @@ index 0000000..7f83c90
 +static void publish(void)
 +{
 +    watch_voice();
++    caption_tick();
 +    if (s_awaiting && now_us() - s_await_us > AWAIT_US) {
 +        ESP_LOGW(TAG, "no response came");
 +        s_awaiting = s_say_next = false;
@@ -5119,8 +5781,35 @@ index 0000000..7f83c90
 +            fail("CAN'T REACH XAI");
 +            continue;
 +        }
++        char *typed = atomic_load(&s_state) == MUSE_LIVE_READY ? atomic_exchange(&s_typed, NULL) : NULL;
++        if (typed && atomic_load(&s_prov) == LIVE_GEMINI) {
++            ESP_LOGI(TAG, "typed: \"%.200s\"", typed);
++            gemini_typed(typed);
++            free(typed);
++            typed = NULL;
++        }
++        if (typed) {
++            cJSON *msg = cJSON_CreateObject();
++            cJSON_AddStringToObject(msg, "type", "conversation.item.create");
++            cJSON *item = cJSON_AddObjectToObject(msg, "item");
++            cJSON_AddStringToObject(item, "type", "message");
++            cJSON_AddStringToObject(item, "role", "user");
++            cJSON *part = cJSON_CreateObject();
++            cJSON_AddStringToObject(part, "type", "input_text");
++            cJSON_AddStringToObject(part, "text", typed);
++            cJSON_AddItemToArray(cJSON_AddArrayToObject(item, "content"), part);
++            ESP_LOGI(TAG, "typed: \"%.200s\"", typed);
++            send_json(msg);
++            create_response();
++        }
++        free(typed);
++        if (atomic_exchange(&s_stop, false)) {
++            barge_in("you clicked");   /* drops the rest if it's still coming, else only what's queued */
++        }
 +        if (atomic_exchange(&s_discard, false)) {
-+            send_raw("{\"type\":\"input_audio_buffer.clear\"}");   /* a noise, not you: not a turn */
++            if (atomic_load(&s_prov) == LIVE_XAI) {
++                send_raw("{\"type\":\"input_audio_buffer.clear\"}");   /* a noise, not you: not a turn */
++            }
 +        }
 +        drain_pending();
 +        for (int i = 0; i < READS_PER_TICK && !s_pend; i++) {
@@ -5170,7 +5859,13 @@ index 0000000..7f83c90
 +
 +bool muse_live_configured(void)
 +{
-+    return muse_xai_tts_configured();
++    load_provider();
++    return atomic_load(&s_prov) == LIVE_GEMINI ? muse_gemini_tts_configured() : muse_xai_tts_configured();
++}
++
++const char *muse_live_no_key(void)
++{
++    return atomic_load(&s_prov) == LIVE_GEMINI ? "SET A GEMINI KEY" : "SET AN XAI KEY";
 +}
 +
 +bool muse_live_open(StreamBufferHandle_t speaker)
@@ -5214,6 +5909,7 @@ index 0000000..7f83c90
 +    st->answering = atomic_load(&s_answering);
 +    st->muse = atomic_load(&s_museing);
 +    st->who = (muse_responder_t)atomic_load(&s_who);
++    st->voice = atomic_load(&s_prov) == LIVE_GEMINI ? MUSE_RESPONDER_GEMINI : MUSE_RESPONDER_GROK;
 +    st->flushes = atomic_load(&s_flushes);
 +    st->mic_waiting = atomic_load(&s_mic_waiting);
 +    if (why) {
@@ -5229,6 +5925,11 @@ index 0000000..7f83c90
 +    }
 +}
 +
++void muse_live_stop_reply(void)
++{
++    atomic_store(&s_stop, true);
++}
++
 +void muse_live_discard_mic(void)
 +{
 +    atomic_store(&s_discard, true);
@@ -5239,6 +5940,11 @@ index 0000000..7f83c90
 +    atomic_store(&s_playing, playing);
 +}
 +
++void muse_live_played(size_t bytes)
++{
++    atomic_fetch_add(&s_played, (uint32_t)bytes);
++}
++
 +void muse_live_beat(int where)
 +{
 +    atomic_store(&s_beat_at, where);
@@ -5246,10 +5952,10 @@ index 0000000..7f83c90
 +}
 diff --git a/esp32/components/muse/muse_live.h b/esp32/components/muse/muse_live.h
 new file mode 100644
-index 0000000..9dac10d
+index 0000000..a31f750
 --- /dev/null
 +++ b/esp32/components/muse/muse_live.h
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,107 @@
 +#pragma once
 +
 +#include <stdbool.h>
@@ -5292,12 +5998,16 @@ index 0000000..9dac10d
 +    bool answering;     /* a response asked for or under way */
 +    bool muse;          /* Muse is working on a question, or its answer waits to be said */
 +    muse_responder_t who;   /* whose words the response under way is */
++    muse_responder_t voice; /* the live voice itself: Grok or Gemini */
 +    uint32_t flushes;   /* bumped whenever the speaker's queued audio is to be dropped */
 +    bool mic_waiting;   /* mic audio still to go out (connecting, or a slow network): you may be talking */
 +} muse_live_status_t;
 +
-+/* An xAI key is stored. */
++/* The provider's key is stored (muse_live_no_key() says which, if not). */
 +bool muse_live_configured(void);
++
++/* What to say when it isn't: "SET AN XAI KEY" or "SET A GEMINI KEY". */
++const char *muse_live_no_key(void);
 +
 +/*
 + * What Grok knows about you before asking Muse anything: a short profile (name,
@@ -5305,6 +6015,10 @@ index 0000000..9dac10d
 + * NVS. After a conversation, if it's missing or a day old, the watch asks Muse
 + * for it again, quietly, and Grok gets it, with the local date and time, at
 + * the start of each conversation.
++ *
++ * Also ">live_provider=xai" or ">live_provider=gemini": whose live voice
++ * (Gemini Live, gemini-3.1-flash-live-preview, costs about a sixth as much a
++ * minute; xAI reads Muse's answers word for word, Gemini says them).
 + *
 + * Console hook for ">profile=TEXT" (yours, typed: never replaced from Muse;
 + * a first line "TZ: <POSIX TZ>" sets the timezone), ">profile=" (cleared: back
@@ -5328,9 +6042,16 @@ index 0000000..9dac10d
 + * up to 2 s while connecting). Never waits; what doesn't fit is dropped. */
 +void muse_live_mic(const int16_t *pcm, size_t frames);
 +
++/* A click while it speaks: the reply is stopped and dropped, the conversation goes on. */
++void muse_live_stop_reply(void);
++
 +/* The watch heard something over the reply (muse_echo.c) and streamed it, but
 + * xAI's voice detection didn't take it for speech: that audio is thrown away. */
 +void muse_live_discard_mic(void);
++
++/* Reply audio taken from `speaker` (played, or dropped by a barge-in), in bytes:
++ * the caption follows it. */
++void muse_live_played(size_t bytes);
 +
 +/* The voice task is playing reply audio: Muse's answer waits until it isn't. */
 +void muse_live_set_playing(bool playing);
@@ -5368,6 +6089,74 @@ index fe603d8..6e8c2ec 100644
 + * between the samples in video.
 + */
 +int muse_pixel_dirty(int *x1, int *y1, int *x2, int *y2);
+diff --git a/esp32/components/muse/muse_resample.c b/esp32/components/muse/muse_resample.c
+new file mode 100644
+index 0000000..6e472ca
+--- /dev/null
++++ b/esp32/components/muse/muse_resample.c
+@@ -0,0 +1,32 @@
++#include "muse_resample.h"
++
++#include <string.h>
++
++void muse_resample_init(muse_resample_t *r)
++{
++    memset(r, 0, sizeof(*r));
++}
++
++size_t muse_resample_24k_16k(muse_resample_t *r, const int16_t *in, size_t n, int16_t *out)
++{
++    size_t o = 0;
++    for (size_t i = 0; i < n; i++) {
++        /* (1 2 1)/4 low-pass, centred one sample back */
++        int32_t f = ((int32_t)r->in[0] + 2 * r->in[1] + in[i]) / 4;
++        r->in[0] = r->in[1];
++        r->in[1] = in[i];
++        r->hist[0] = r->hist[1];
++        r->hist[1] = (int16_t)f;
++        if (++r->seen < 2) {
++            continue;
++        }
++        /* Outputs fall every 1.5 inputs: at phase 0 on a sample, at phase 3 (out of 6) halfway between. */
++        while (r->phase < 6) {
++            int32_t a = r->hist[0], b = r->hist[1];
++            out[o++] = (int16_t)(a + (b - a) * (int32_t)r->phase / 6);
++            r->phase += 9;   /* 1.5 inputs, in sixths */
++        }
++        r->phase -= 6;
++    }
++    return o;
++}
+diff --git a/esp32/components/muse/muse_resample.h b/esp32/components/muse/muse_resample.h
+new file mode 100644
+index 0000000..a11b1eb
+--- /dev/null
++++ b/esp32/components/muse/muse_resample.h
+@@ -0,0 +1,24 @@
++/*
++ * 24 kHz to 16 kHz, for speech that comes at 24 kHz (Gemini's live voice) and
++ * a speaker that plays 16 kHz. Every three samples in make two out: a short
++ * low-pass first (what's over 8 kHz would fold back as hiss), then linear
++ * interpolation at the new spacing. It keeps two samples between calls, so a
++ * stream can be fed in pieces of any length.
++ */
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++typedef struct {
++    int16_t hist[2];   /* the last two filtered inputs */
++    int16_t in[2];     /* the last two raw inputs, for the filter */
++    uint32_t phase;    /* where the next output falls past hist[0], in sixths of an input sample */
++    size_t seen;       /* inputs so far */
++} muse_resample_t;
++
++void muse_resample_init(muse_resample_t *r);
++
++/* Converts `n` 24 kHz samples; writes up to 2n/3 + 2 16 kHz samples to `out`
++ * and returns how many. */
++size_t muse_resample_24k_16k(muse_resample_t *r, const int16_t *in, size_t n, int16_t *out);
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
 index 4b0dda9..9ac91f3 100644
 --- a/esp32/components/muse/muse_settings.c
@@ -5563,7 +6352,7 @@ index 6a372ac..50a82e1 100644
  }
  
 diff --git a/esp32/components/muse/muse_state.c b/esp32/components/muse/muse_state.c
-index 27377e2..e3aefa7 100644
+index 27377e2..004a673 100644
 --- a/esp32/components/muse/muse_state.c
 +++ b/esp32/components/muse/muse_state.c
 @@ -38,6 +38,9 @@ static volatile float s_level;
@@ -5587,13 +6376,13 @@ index 27377e2..e3aefa7 100644
 +        /* The reply's last face is its ending: it plays once more from now,
 +         * over idle, and no further (the avatar times it out). */
 +        s_reaction_us = s_mode_since_us;
-+    } else if (!(was_reply && is_reply)) {
++    } else if (!is_reply) {
 +        s_reaction = MUSE_REACT_NONE;   /* a reply's faces end with it */
-+    }
++    }   /* entering a reply keeps a face set just before it (a live voice's mood, Muse's face tag) */
      s_mode = mode;
  }
  
-@@ -231,6 +243,32 @@ void muse_state_nudge(void)
+@@ -231,6 +243,44 @@ void muse_state_nudge(void)
      xEventGroupSetBits(s_wake, NUDGE_BIT);
  }
  
@@ -5614,6 +6403,18 @@ index 27377e2..e3aefa7 100644
 +    return s_responder;
 +}
 +
++static volatile bool s_waiting_on;
++
++void muse_state_set_waiting(bool waiting)
++{
++    s_waiting_on = waiting;
++}
++
++bool muse_state_waiting(void)
++{
++    return s_waiting_on;
++}
++
 +muse_reaction_t muse_state_reaction(float *secs)
 +{
 +    muse_reaction_t r = s_reaction;
@@ -5627,7 +6428,7 @@ index 27377e2..e3aefa7 100644
  {
      s_happy_until_us = esp_timer_get_time() + (int64_t)(HAPPY_SECS * 1e6f);
 diff --git a/esp32/components/muse/muse_state.h b/esp32/components/muse/muse_state.h
-index ecea3fe..1565501 100644
+index ecea3fe..0a42600 100644
 --- a/esp32/components/muse/muse_state.h
 +++ b/esp32/components/muse/muse_state.h
 @@ -58,6 +58,9 @@ float muse_state_progress(void);
@@ -5640,7 +6441,7 @@ index ecea3fe..1565501 100644
  
  void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  /* Copies the caption if it changed since *version; returns true on change. */
-@@ -95,3 +98,28 @@ void muse_state_nudge(void);
+@@ -95,3 +98,32 @@ void muse_state_nudge(void);
  /* Touch/pet reaction. */
  void muse_state_make_happy(void);
  float muse_state_happiness(void);
@@ -5666,11 +6467,15 @@ index ecea3fe..1565501 100644
 +    MUSE_RESPONDER_NONE,
 +    MUSE_RESPONDER_GROK,
 +    MUSE_RESPONDER_MUSE,
++    MUSE_RESPONDER_GEMINI,
 +} muse_responder_t;
 +void muse_state_set_responder(muse_responder_t who);
 +muse_responder_t muse_state_responder(void);
++/* ...and whether we're waiting on them (a spinner round the logo) rather than hearing them. */
++void muse_state_set_waiting(bool waiting);
++bool muse_state_waiting(void);
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..4ed2421 100644
+index d0d4e2f..6bdfa5c 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -5714,7 +6519,7 @@ index d0d4e2f..4ed2421 100644
  static lv_obj_t *s_pair_title;
  static lv_obj_t *s_pair_hint;
  static lv_obj_t *s_canvas;
-@@ -132,7 +134,24 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
+@@ -132,7 +134,26 @@ static lv_obj_t *s_bar;     /* compact layout's stand-in for the ring */
  static lv_obj_t *s_state_lbl;
  static lv_obj_t *s_name_lbl;    /* this gadget's own name, to tell it from the next one */
  static lv_obj_t *s_power_lbl;
@@ -5724,8 +6529,10 @@ index d0d4e2f..4ed2421 100644
 +static bool s_on_settings;      /* the settings page is showing: no tape or ring */
 +#define BATT_RING_PX 46
 +#define MIC_DOT_COLOR 0xffd60a   /* the mic-on dot */
++#define COLOR_WIFI_ICON 0xc8c4dc
 +#define LIVE_RING_W 10             /* live_talk: the ring while it listens or speaks, steady */
 +#define LIVE_RING_OPA LV_OPA_80
++#define LIVE_CAPTION_LINES 4       /* live_talk: a reply's last lines, at the bottom */
 +#define BATT_WHITE 0xffffff
 +#define BATT_GREEN 0x3ddc84   /* charging, until full (it tops up on USB at 100% too) */
 +#define BATT_YELLOW 0xffc83d
@@ -5739,7 +6546,7 @@ index d0d4e2f..4ed2421 100644
  static lv_obj_t *s_reply_lbl;   /* full layout: the reply's page while answering */
  static lv_obj_t *s_meter[METER_SEGS];
  static lv_obj_t *s_speaker;
-@@ -159,6 +178,8 @@ static int s_shown_lit = -1;
+@@ -159,6 +180,8 @@ static int s_shown_lit = -1;
  static uint32_t s_shown_accent;
  static bool s_meter_visible = true;
  static int s_ring_value = -1;
@@ -5748,7 +6555,7 @@ index d0d4e2f..4ed2421 100644
  static uint32_t s_caption_version;
  static float s_next_power_update;
  static float s_next_settings_tick;
-@@ -190,6 +211,56 @@ static int s_big_y;             /* Muse's centre at full size */
+@@ -190,6 +213,56 @@ static int s_big_y;             /* Muse's centre at full size */
  static int s_muse_y;            /* and now */
  static int s_from_px, s_from_y, s_to_px, s_to_y;
  
@@ -5805,7 +6612,7 @@ index d0d4e2f..4ed2421 100644
  static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
      [MUSE_MODE_BOOT] = "WAKING UP",
      [MUSE_MODE_IDLE] = "READY",
-@@ -329,8 +400,25 @@ static int32_t rect_cells(const lv_area_t *r)
+@@ -329,8 +402,25 @@ static int32_t rect_cells(const lv_area_t *r)
      return lv_area_get_width(r) * lv_area_get_height(r);
  }
  
@@ -5831,7 +6638,7 @@ index d0d4e2f..4ed2421 100644
      if (!s_cells) {
          lv_obj_invalidate(s_canvas);
          return;
-@@ -502,24 +590,74 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
+@@ -502,24 +592,78 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
      return s_small ? compact : full;
  }
  
@@ -5870,10 +6677,14 @@ index d0d4e2f..4ed2421 100644
 +/* Who's answering in a live conversation, by the battery ring: u16 w, u16 h, then RGB565A8 (avatar/make_icons.py). */
 +extern const uint8_t s_grok_logo[] asm("_binary_grok_rgb565a8_start");
 +extern const uint8_t s_muse_logo[] asm("_binary_muse_rgb565a8_start");
-+static lv_image_dsc_t s_logo_dsc[2];   /* Grok, Muse */
++extern const uint8_t s_gemini_logo[] asm("_binary_gemini_rgb565a8_start");
++static lv_image_dsc_t s_logo_dsc[3];   /* Grok, Muse, Gemini */
 +static lv_obj_t *s_logo;
++static lv_obj_t *s_logo_spin;          /* round the logo while we wait on that one */
 +static muse_responder_t s_logo_shown;
-+#define LOGO_DX -40                    /* left of the battery ring's centre, level with it */
++#define LOGO_SPIN_PX 32
++#define LOGO_SPIN_W 3
++#define LOGO_D -30                     /* up and left of the battery ring's centre, where the mic dot was */
 +
 +static void logo_dsc(lv_image_dsc_t *d, const uint8_t *src)
 +{
@@ -5915,7 +6726,7 @@ index d0d4e2f..4ed2421 100644
  }
  
  static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
-@@ -666,12 +804,23 @@ static void set_answer(int which)
+@@ -666,12 +810,23 @@ static void set_answer(int which)
      if (!muse_board->round) {
          lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
      }
@@ -5941,7 +6752,7 @@ index d0d4e2f..4ed2421 100644
  }
  
  /* Whether a reply `w` px wide fits across the screen `y` px from the centre. */
-@@ -684,10 +833,15 @@ static bool fits_across(int w, int y, int ring_in)
+@@ -684,10 +839,15 @@ static bool fits_across(int w, int y, int ring_in)
      return w * w / 4 + y * y <= r * r;
  }
  
@@ -5958,7 +6769,7 @@ index d0d4e2f..4ed2421 100644
      if (muse_board->round) {
          int r = ring_in - 6;
          int chord = w / 2 < r ? (int)sqrtf((float)(r * r - w * w / 4)) : 0;
-@@ -765,6 +919,11 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -765,6 +925,11 @@ static void build_answer(lv_obj_t *face, int ring_in)
      }
  
      l = &s_answers[ANSWER_READ];
@@ -5970,7 +6781,7 @@ index d0d4e2f..4ed2421 100644
      int status_bottom = (muse_board->rim_controls ? 40 : 20 + s_dy) + 16 - s_h / 2;
      l->px = MUSE_PX_W * MINI_CELL_PX;
      l->y = status_bottom + 2 + l->px / 2;   /* its sparkles clear of the status line */
-@@ -774,17 +933,23 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -774,17 +939,44 @@ static void build_answer(lv_obj_t *face, int ring_in)
      set_reply_box(l, muse_board->rim_controls ? 13 : 16, 2, top, cw, pitch);
      /* The widest page isn't the biggest: a round screen narrows towards the bottom. */
      /* Keep read replies in a central column clear of dedicated rim hints. */
@@ -5993,10 +6804,31 @@ index d0d4e2f..4ed2421 100644
 +        l->align = LV_TEXT_ALIGN_CENTER;   /* a round block, on a round screen */
 +        s_answers[ANSWER_HEARD] = *l;      /* heard replies get the big page too */
 +    }
++    if (muse_board->live_talk) {
++        /* Live replies: three lines in the bottom section, as wide as fit there,
++         * on their scrim over Muse, which stays as it is (set_answer). */
++        answer_layout_t *v = &s_answers[ANSWER_HEARD];
++        memset(v, 0, sizeof(*v));
++        v->px = s_canvas_px;
++        v->y = s_big_y;
++        v->align = LV_TEXT_ALIGN_LEFT;   /* lines that scroll up read best from a straight edge */
++        int ocw = lv_font_get_glyph_width(font, 'o', ' ');
++        int lh = LIVE_CAPTION_LINES * pitch - CAPTION_LINE_SPACE;
++        for (int c = 12; c <= 40; c++) {
++            int top = reply_bottom(c * ocw, ring_in) - lh;
++            if (c > 12 && !fits_across(c * ocw, top, ring_in)) {
++                break;
++            }
++            if (top < 8) {
++                break;   /* the bottom half only: under Muse's face */
++            }
++            set_reply_box(v, c, LIVE_CAPTION_LINES, top, ocw, pitch);
++        }
++    }
      ESP_LOGI(TAG, "reply pages: %d x %d heard, %d x %d read", s_answers[ANSWER_HEARD].cols,
               s_answers[ANSWER_HEARD].lines, l->cols, l->lines);
  
-@@ -794,6 +959,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -794,6 +986,7 @@ static void build_answer(lv_obj_t *face, int ring_in)
      lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
      lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
      lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -6004,7 +6836,7 @@ index d0d4e2f..4ed2421 100644
  
      if (muse_board->touch && !muse_board->rim_controls) {
          build_speaker(face, spk_x, spk_y);
-@@ -801,7 +967,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
+@@ -801,7 +994,9 @@ static void build_answer(lv_obj_t *face, int ring_in)
  
      /* Out of the way while a page is up: the mode name, where Muse was. */
      lv_obj_update_layout(face);
@@ -6015,7 +6847,18 @@ index d0d4e2f..4ed2421 100644
      s_answers[ANSWER_READ].hides[1] = s_name_lbl;   /* the reply takes the top too */
      add_hides(&s_answers[ANSWER_READ], 2);
      add_hides(&s_answers[ANSWER_HEARD], 0);
-@@ -897,7 +1065,7 @@ static void build_screen(void)
+@@ -824,7 +1019,9 @@ static void on_ring_draw(lv_event_t *e)
+     int32_t cx = (c.x1 + c.x2) / 2;
+     int32_t cy = (c.y1 + c.y2) / 2;
+     int32_t out = lv_area_get_width(&c) / 2 + 1;                                     /* with antialiasing */
+-    int32_t hole = out - 1 - lv_obj_get_style_arc_width(s_ring, LV_PART_MAIN) - 2;   /* without */
++    int32_t width = LV_MAX(lv_obj_get_style_arc_width(s_ring, LV_PART_MAIN),
++                           lv_obj_get_style_arc_width(s_ring, LV_PART_INDICATOR));   /* the wider of track and band */
++    int32_t hole = out - 1 - width - 2;   /* without */
+     lv_event_stop_processing(e);
+     for (int32_t y = LV_MAX(clip.y1, cy - out); y <= LV_MIN(clip.y2, cy + out); y += RING_SLAB_ROWS) {
+         int32_t y2 = LV_MIN(y + RING_SLAB_ROWS - 1, clip.y2);
+@@ -897,7 +1094,7 @@ static void build_screen(void)
       * whose blank bottom rows can tuck in behind the meter.
       */
      int ring_in = (s_w < s_h ? s_w : s_h) / 2 - 10;   /* the ring's inner edge */
@@ -6024,7 +6867,7 @@ index d0d4e2f..4ed2421 100644
      int cap_bottom = 179;                              /* a 466 px circle's; fine for rectangles */
      if (muse_board->round) {
          cap_bottom = (int)sqrtf((float)(ring_in * ring_in - CAPTION_W * CAPTION_W / 4)) - 3;
-@@ -906,6 +1074,14 @@ static void build_screen(void)
+@@ -906,6 +1103,14 @@ static void build_screen(void)
      int meter_y = cap_top - 6 - METER_SEG_PX / 2;
      int art_bottom = meter_y - METER_SEG_PX / 2 - 4;
      s_big_y = s_small ? 0 : art_bottom - (s_canvas_px / 2 - ART_BLANK_ROWS * (s_canvas_px / MUSE_PX_W));
@@ -6039,7 +6882,7 @@ index d0d4e2f..4ed2421 100644
  
      /* The character. */
      muse_image_init();
-@@ -933,24 +1109,31 @@ static void build_screen(void)
+@@ -933,24 +1138,31 @@ static void build_screen(void)
      s_wifi_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_ble_icon = make_label(status, &lv_font_montserrat_14, COLOR_DIM);
      s_power_lbl = make_label(status, &lv_font_unscii_8, COLOR_DIM);
@@ -6076,7 +6919,7 @@ index d0d4e2f..4ed2421 100644
          lv_label_set_long_mode(s_state_lbl, LV_LABEL_LONG_MODE_DOTS);
          lv_label_set_long_mode(s_name_lbl, LV_LABEL_LONG_MODE_DOTS);
      }
-@@ -984,11 +1167,53 @@ static void build_screen(void)
+@@ -984,11 +1196,53 @@ static void build_screen(void)
          return;
      }
      /* Fixed height: a longer caption ends in dots rather than growing into the ring. */
@@ -6131,7 +6974,7 @@ index d0d4e2f..4ed2421 100644
      /* Chunky level meter. */
      int span = METER_SEGS * (METER_SEG_PX + METER_GAP_PX) - METER_GAP_PX;
      for (int i = 0; i < METER_SEGS; i++) {
-@@ -996,6 +1221,7 @@ static void build_screen(void)
+@@ -996,6 +1250,7 @@ static void build_screen(void)
          lv_obj_remove_style_all(seg);
          lv_obj_remove_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
          lv_obj_set_size(seg, METER_SEG_PX, METER_SEG_PX);
@@ -6139,7 +6982,7 @@ index d0d4e2f..4ed2421 100644
          lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
          lv_obj_set_style_bg_color(seg, lv_color_hex(COLOR_METER_OFF), 0);
          int x = -span / 2 + i * (METER_SEG_PX + METER_GAP_PX) + METER_SEG_PX / 2;
-@@ -1010,6 +1236,9 @@ static void build_screen(void)
+@@ -1010,6 +1265,9 @@ static void build_screen(void)
  static void on_cover_event(lv_event_t *e)
  {
      if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
@@ -6149,7 +6992,7 @@ index d0d4e2f..4ed2421 100644
          /* Wake on touch; keep the (now clear) cover until release so the tap
           * doesn't land on whatever is underneath. */
          muse_state_set_asleep(false);
-@@ -1109,9 +1338,19 @@ static void update_control_hints(muse_mode_t mode)
+@@ -1109,9 +1367,19 @@ static void update_control_hints(muse_mode_t mode)
      if (!s_ptt_hint) return;
      /* Don't obscure settings rows/keyboards with floating physical icons. */
      bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
@@ -6172,7 +7015,7 @@ index d0d4e2f..4ed2421 100644
      static int last_mode = -1;
      if ((int)mode != last_mode) {
          color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
-@@ -1139,6 +1378,7 @@ static void build_overlays(void)
+@@ -1139,6 +1407,7 @@ static void build_overlays(void)
          lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
          lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
          lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
@@ -6180,7 +7023,7 @@ index d0d4e2f..4ed2421 100644
          s_dots[i] = d;
      }
  
-@@ -1173,6 +1413,118 @@ static void build_overlays(void)
+@@ -1173,6 +1442,138 @@ static void build_overlays(void)
          update_control_hints(MUSE_MODE_BOOT);
      }
  
@@ -6206,7 +7049,7 @@ index d0d4e2f..4ed2421 100644
 +        lv_obj_set_style_arc_width(s_batt_arc, 4, LV_PART_INDICATOR);
 +        lv_obj_set_style_arc_rounded(s_batt_arc, true, LV_PART_INDICATOR);
 +        /* The Wi-Fi icon inside the ring; the ring's fill and colour are the charge. */
-+        s_side_wifi = make_label(s_batt_ring, &lv_font_montserrat_20, 0xc8c4dc);
++        s_side_wifi = make_label(s_batt_ring, &lv_font_montserrat_20, COLOR_WIFI_ICON);
 +        lv_obj_align(s_side_wifi, LV_ALIGN_CENTER, 0, 1);
 +        lv_obj_add_flag(s_batt_ring, LV_OBJ_FLAG_HIDDEN);   /* until there's a reading */
 +
@@ -6220,19 +7063,39 @@ index d0d4e2f..4ed2421 100644
 +            lv_obj_set_style_bg_opa(s_mic_dot, LV_OPA_COVER, 0);
 +            lv_obj_set_style_bg_color(s_mic_dot, lv_color_hex(MIC_DOT_COLOR), 0);
 +            lv_obj_remove_flag(s_mic_dot, LV_OBJ_FLAG_CLICKABLE);
-+            lv_obj_align(s_mic_dot, muse_board->battery_ring.align, muse_board->battery_ring.x - 26,
-+                         muse_board->battery_ring.y - 26);
++            if (muse_board->live_talk) {
++                /* At 6 o'clock, just inside the ring, under the captions: the agent's logo has
++                 * the spot by the battery. */
++                lv_obj_align(s_mic_dot, LV_ALIGN_BOTTOM_MID, 0, -(LIVE_RING_W + 8));
++            } else {
++                lv_obj_align(s_mic_dot, muse_board->battery_ring.align, muse_board->battery_ring.x - 26,
++                             muse_board->battery_ring.y - 26);
++            }
 +            lv_obj_add_flag(s_mic_dot, LV_OBJ_FLAG_HIDDEN);
 +        }
 +#if MUSE_HAS_LOGOS
 +        if (muse_board->live_talk) {
 +            logo_dsc(&s_logo_dsc[0], s_grok_logo);
 +            logo_dsc(&s_logo_dsc[1], s_muse_logo);
++            logo_dsc(&s_logo_dsc[2], s_gemini_logo);
 +            s_logo = lv_image_create(scr);
 +            lv_obj_remove_flag(s_logo, LV_OBJ_FLAG_CLICKABLE);
-+            lv_obj_align(s_logo, muse_board->battery_ring.align, muse_board->battery_ring.x + LOGO_DX,
-+                         muse_board->battery_ring.y);
++            lv_obj_align(s_logo, muse_board->battery_ring.align, muse_board->battery_ring.x + LOGO_D,
++                         muse_board->battery_ring.y + LOGO_D);
 +            lv_obj_add_flag(s_logo, LV_OBJ_FLAG_HIDDEN);
++            /* A small arc of its own: turning it redraws only its 32 px, not the screen's ring. */
++            s_logo_spin = lv_arc_create(scr);
++            lv_obj_set_size(s_logo_spin, LOGO_SPIN_PX, LOGO_SPIN_PX);
++            lv_obj_remove_style(s_logo_spin, NULL, LV_PART_KNOB);
++            lv_obj_remove_flag(s_logo_spin, LV_OBJ_FLAG_CLICKABLE);
++            lv_obj_set_style_arc_opa(s_logo_spin, LV_OPA_TRANSP, LV_PART_MAIN);
++            lv_obj_set_style_arc_width(s_logo_spin, LOGO_SPIN_W, LV_PART_INDICATOR);
++            lv_obj_set_style_arc_color(s_logo_spin, lv_color_white(), LV_PART_INDICATOR);
++            lv_obj_set_style_arc_rounded(s_logo_spin, true, LV_PART_INDICATOR);
++            lv_arc_set_bg_angles(s_logo_spin, 0, 360);
++            lv_obj_align(s_logo_spin, muse_board->battery_ring.align, muse_board->battery_ring.x + LOGO_D,
++                         muse_board->battery_ring.y + LOGO_D);
++            lv_obj_add_flag(s_logo_spin, LV_OBJ_FLAG_HIDDEN);
 +        }
 +#endif
 +    }
@@ -6299,7 +7162,7 @@ index d0d4e2f..4ed2421 100644
      /* BLE pairing code, or the Muse app's ask for the talk button: a centred
       * column in one typeface, the code large. The small card grows with the hint. */
      s_pair = lv_obj_create(lv_layer_top());
-@@ -1302,8 +1654,8 @@ static void update_chrome(float now)
+@@ -1302,8 +1703,8 @@ static void update_chrome(float now)
          int shown = page * 2 + subpage;
          if (shown != s_shown_page) {
              for (int i = 0; i < 2; i++) {
@@ -6310,7 +7173,7 @@ index d0d4e2f..4ed2421 100644
              }
              s_shown_page = shown;
          }
-@@ -1318,6 +1670,9 @@ static void update_chrome(float now)
+@@ -1318,6 +1719,9 @@ static void update_chrome(float now)
      if (strcmp(wifi, lv_label_get_text(s_wifi_icon)) != 0) {
          lv_label_set_text(s_wifi_icon, wifi);
      }
@@ -6320,7 +7183,7 @@ index d0d4e2f..4ed2421 100644
      s_idle_name = idle_name(w.state);
      muse_ble_status_t b;
      muse_ble_status(&b);
-@@ -1337,7 +1692,7 @@ static void update_chrome(float now)
+@@ -1337,7 +1741,7 @@ static void update_chrome(float now)
       * read layout unhides it on the way out. A narrow screen gets the hex tail
       * on its own, which is the part that differs between two of them, rather
       * than a head that ends in dots before it gets there. */
@@ -6329,7 +7192,7 @@ index d0d4e2f..4ed2421 100644
      int name_cw = lv_font_get_glyph_width(name_font, 'M', ' ');
      const char *shown = paired ? "" : b.name;
  #if LV_USE_SNAPSHOT
-@@ -1376,7 +1731,11 @@ static void update_chrome(float now)
+@@ -1376,7 +1780,11 @@ static void update_chrome(float now)
              lv_label_set_text(s_pair_hint, hint);
          }
      }
@@ -6342,7 +7205,7 @@ index d0d4e2f..4ed2421 100644
  
      bool speaker = muse_settings_speaker_on();   /* also set from settings, the phone and serial */
      if (s_speaker && (int)speaker != s_shown_speaker) {
-@@ -1442,6 +1801,56 @@ static void update_power(float now)
+@@ -1442,6 +1850,56 @@ static void update_power(float now)
      if (strcmp(buf, lv_label_get_text(s_power_lbl)) != 0) {
          lv_label_set_text(s_power_lbl, buf);
      }
@@ -6399,7 +7262,7 @@ index d0d4e2f..4ed2421 100644
  }
  
  static void update_status(muse_mode_t mode, float now)
-@@ -1450,13 +1859,20 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1450,13 +1908,21 @@ static void update_status(muse_mode_t mode, float now)
      const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
  
      if (name != s_shown_name) {
@@ -6419,11 +7282,12 @@ index d0d4e2f..4ed2421 100644
 +            /* live_talk: a bolder band while it listens or speaks. */
 +            bool band = muse_board->live_talk && (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING);
 +            lv_obj_set_style_arc_width(s_ring, band ? LIVE_RING_W : 6, LV_PART_INDICATOR);
++            lv_obj_set_style_arc_width(s_ring, band ? LIVE_RING_W : 6, LV_PART_MAIN);   /* one edge, not two */
 +            s_ring_opa = -1;   /* set below, every tick while listening */
          } else {
              lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
          }
-@@ -1465,13 +1881,50 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1465,13 +1931,58 @@ static void update_status(muse_mode_t mode, float now)
          s_shown_lit = -1;
      }
  
@@ -6458,7 +7322,7 @@ index d0d4e2f..4ed2421 100644
 +            lv_obj_set_style_arc_opa(s_ring, opa, LV_PART_INDICATOR);
 +            s_ring_opa = opa;
 +        }
-     }
++    }
 +    bool dot = live_mic && !s_on_settings;   /* hidden on settings, with the battery ring */
 +    if (s_mic_dot && dot == lv_obj_has_flag(s_mic_dot, LV_OBJ_FLAG_HIDDEN)) {
 +        lv_obj_set_flag(s_mic_dot, LV_OBJ_FLAG_HIDDEN, !dot);
@@ -6469,15 +7333,23 @@ index d0d4e2f..4ed2421 100644
 +    if (s_logo && who != s_logo_shown) {
 +        s_logo_shown = who;
 +        if (who != MUSE_RESPONDER_NONE) {
-+            lv_image_set_src(s_logo, &s_logo_dsc[who == MUSE_RESPONDER_MUSE]);
++            lv_image_set_src(s_logo, &s_logo_dsc[who == MUSE_RESPONDER_MUSE ? 1 : who == MUSE_RESPONDER_GEMINI ? 2 : 0]);
 +        }
 +        lv_obj_set_flag(s_logo, LV_OBJ_FLAG_HIDDEN, who == MUSE_RESPONDER_NONE);
 +    }
++    bool spin = s_logo_spin && who != MUSE_RESPONDER_NONE && muse_state_waiting();
++    if (s_logo_spin && spin == lv_obj_has_flag(s_logo_spin, LV_OBJ_FLAG_HIDDEN)) {
++        lv_obj_set_flag(s_logo_spin, LV_OBJ_FLAG_HIDDEN, !spin);
++    }
++    if (spin) {
++        int a = (int)(now * 360.0f) % 360;   /* a turn a second */
++        lv_arc_set_angles(s_logo_spin, a, a + 100);
+     }
 +#endif
      if (s_ring && mode == MUSE_MODE_THINKING) {
          /* Move the indicator rather than rotate the arc: a rotation redraws
           * the whole ring, and with it the whole screen. */
-@@ -1498,7 +1951,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1498,7 +2009,7 @@ static void update_status(muse_mode_t mode, float now)
      }
  
      /* The mic's meter; a reply's page has the room while answering. */
@@ -6486,7 +7358,17 @@ index d0d4e2f..4ed2421 100644
      set_meter_visible(meter);
      if (meter && !s_small) {
          int lit = (int)lroundf(s_level * METER_SEGS);
-@@ -1528,6 +1981,11 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1520,7 +2031,8 @@ static void update_status(muse_mode_t mode, float now)
+     int answer = -1;
+     if (s_reply_lbl) {
+         /* The speaker picks the layout, even mid-reply: the voice task pages to fit. */
+-        int layout = muse_settings_speaker_on() ? ANSWER_HEARD : ANSWER_READ;
++        /* live_talk: always the live layout (left-aligned lines in the bottom half), speaker or not. */
++        int layout = muse_settings_speaker_on() || muse_board->live_talk ? ANSWER_HEARD : ANSWER_READ;
+         if (layout != s_page_for) {
+             muse_state_set_page(s_answers[layout].cols, s_answers[layout].lines);
+             s_page_for = layout;
+@@ -1528,6 +2040,11 @@ static void update_status(muse_mode_t mode, float now)
          if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING) {
              answer = layout;
          }
@@ -6498,7 +7380,7 @@ index d0d4e2f..4ed2421 100644
      }
      if (answer != s_answer) {
          set_answer(answer);
-@@ -1540,12 +1998,40 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1540,12 +2057,40 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif
@@ -6541,7 +7423,7 @@ index d0d4e2f..4ed2421 100644
      update_power(now);
  }
  
-@@ -1644,12 +2130,16 @@ static void frame_tick(lv_timer_t *timer)
+@@ -1644,12 +2189,16 @@ static void frame_tick(lv_timer_t *timer)
      float level = muse_state_level();
      s_level += (level - s_level) * (level > s_level ? 0.6f : 0.2f);
  
@@ -6558,7 +7440,7 @@ index d0d4e2f..4ed2421 100644
      };
      muse_pixel_render(&pose);
      invalidate_muse();
-@@ -1705,10 +2195,14 @@ esp_err_t muse_ui_start(void)
+@@ -1705,10 +2254,14 @@ esp_err_t muse_ui_start(void)
      }
      build_overlays();
      lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
@@ -6701,7 +7583,7 @@ index 0000000..b48fd58
 +/* One chunk's level; returns the state after it. */
 +muse_vad_state_t muse_vad_feed(muse_vad_t *v, float db);
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 38c7c9d..87af81f 100644
+index 38c7c9d..68e5f93 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
 @@ -31,6 +31,12 @@
@@ -6717,7 +7599,7 @@ index 38c7c9d..87af81f 100644
  #include "muse_chat.h"
  #include "muse_input.h"
  #include "muse_mem.h"
-@@ -50,6 +56,23 @@ static const char *TAG = "muse_voice";
+@@ -50,6 +56,27 @@ static const char *TAG = "muse_voice";
  #define PRE_CHUNKS 16                                  /* 320 ms of audio kept from before the press */
  #endif
  #define SETTLE_CHUNKS 10   /* after Muse makes a sound, 200 ms of capture is its own tail */
@@ -6737,11 +7619,15 @@ index 38c7c9d..87af81f 100644
 +#define LIVE_TAIL_CHUNKS 15                            /* 300 ms */
 +#define LIVE_CONFIRM_US 1500000                        /* a maybe-barge-in: xAI has this long to hear speech in it */
 +#define LIVE_DUCK 4                                    /* ...while the reply plays this many times quieter (-12 dB) */
-+#define LIVE_GAIN_DIV 2                                /* xAI's voice comes in hot: -6 dB before the speaker's boost */
++/* xAI's voice peaks near -5 dBFS: x2/5 (-8 dB) keeps it under the speaker's limiter after
++ * its +12 dB boost, so the limiter never has to clamp it (which sounded clipped). */
++#define LIVE_GAIN_NUM 2
++#define LIVE_GAIN_DEN 5
++#define LIVE_GAIN_DEN_GEMINI 8   /* Gemini's voice comes about 4 dB hotter still: x1/4, -12 dB */
  #define REST_BACKSTOP_MS 60000
  
  #if CONFIG_MUSE_HATCH
-@@ -139,6 +162,20 @@ static void pre_reset(void)
+@@ -139,6 +166,20 @@ static void pre_reset(void)
      s_settle = SETTLE_CHUNKS;
  }
  
@@ -6762,7 +7648,7 @@ index 38c7c9d..87af81f 100644
  /* One 20 ms idle read: feeds the pre-roll ring and the settings mic meter. */
  static void idle_capture(void)
  {
-@@ -154,15 +191,7 @@ static void idle_capture(void)
+@@ -154,15 +195,7 @@ static void idle_capture(void)
          s_settle--;
          return;
      }
@@ -6779,7 +7665,7 @@ index 38c7c9d..87af81f 100644
  }
  
  /* Non-blocking: returns true if an event of `type` arrived (others dropped). */
-@@ -238,6 +267,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -238,6 +271,23 @@ static void take(rec_stats_t *st, const int16_t *pcm)
      feed_live();
  }
  
@@ -6803,7 +7689,7 @@ index 38c7c9d..87af81f 100644
  /*
   * Records speech until release or MAX_SECS, starting with the pre-roll; *held
   * gets the part after the press. It streams to Hatch as it goes if it can.
-@@ -246,8 +292,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
+@@ -246,8 +296,18 @@ static void take(rec_stats_t *st, const int16_t *pcm)
   * kept note to fall back on (why says what failed). There is no start chirp:
   * anything played now would land on top of the first words.
   */
@@ -6823,7 +7709,7 @@ index 38c7c9d..87af81f 100644
      muse_state_set_mode(MUSE_MODE_LISTENING);
      muse_state_set_progress(0);
      s_rec_n = s_sent = 0;
-@@ -255,7 +311,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -255,7 +315,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
      if (!s_rec || (muse_hatch_ready() && !s_held_count)) {
          go_live();
      }
@@ -6832,7 +7718,7 @@ index 38c7c9d..87af81f 100644
      bool heard = false, ok = true;
      bool gave_up = false;   /* Hatch failed this note: it's kept, and goes later */
      char text[96];
-@@ -271,6 +327,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -271,6 +331,7 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          for (size_t i = 0; i < s_pre_fill; i++) {
              pre_get(i, s_chunk);
              take(&st, s_chunk);
@@ -6840,7 +7726,7 @@ index 38c7c9d..87af81f 100644
              n += MUSE_AUDIO_CHUNK;
          }
      }
-@@ -283,13 +340,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -283,13 +344,23 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          }
          muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
          take(&st, s_chunk);
@@ -6865,7 +7751,7 @@ index 38c7c9d..87af81f 100644
              } else if (ev == MUSE_HATCH_EV_ERROR) {
                  ESP_LOGW(TAG, "muse: %s", text);
                  muse_hatch_turn_cancel();
-@@ -309,19 +376,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -309,19 +380,32 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
              go_live();
          }
          muse_state_set_progress((float)n / MAX_FRAMES);
@@ -6900,7 +7786,7 @@ index 38c7c9d..87af81f 100644
      *held = n - pre;
  
      char tail[160];
-@@ -347,7 +427,7 @@ static void go_idle(const char *caption);
+@@ -347,7 +431,7 @@ static void go_idle(const char *caption);
  static bool hatch_reply(bool *delivered)
  {
      muse_state_set_mode(MUSE_MODE_THINKING);
@@ -6909,7 +7795,7 @@ index 38c7c9d..87af81f 100644
      static int16_t buf[MUSE_AUDIO_CHUNK];
      static const int16_t silence[MUSE_AUDIO_CHUNK];
      char text[96];
-@@ -355,20 +435,22 @@ static bool hatch_reply(bool *delivered)
+@@ -355,20 +439,22 @@ static bool hatch_reply(bool *delivered)
      bool done = false, speaking = false, replied = false;
      size_t played = 0;
      int64_t t0 = esp_timer_get_time();
@@ -6934,7 +7820,7 @@ index 38c7c9d..87af81f 100644
                  }
                  break;
              case MUSE_HATCH_EV_REPLY:
-@@ -407,6 +489,7 @@ static bool hatch_reply(bool *delivered)
+@@ -407,6 +493,7 @@ static bool hatch_reply(bool *delivered)
              muse_state_set_level(muse_audio_level(buf, n));
              muse_audio_write(buf, n);
              played += n;
@@ -6942,7 +7828,7 @@ index 38c7c9d..87af81f 100644
          } else if (done) {
              break;
          } else if (speaking) {
-@@ -414,14 +497,30 @@ static bool hatch_reply(bool *delivered)
+@@ -414,14 +501,30 @@ static bool hatch_reply(bool *delivered)
              muse_state_set_level(0);
              muse_audio_write(silence, MUSE_AUDIO_CHUNK);
          }
@@ -6975,7 +7861,7 @@ index 38c7c9d..87af81f 100644
      if (!played) {
          /* No speech (TTS unavailable): leave the reply text up for a moment. */
          vTaskDelay(pdMS_TO_TICKS(2500));
-@@ -496,6 +595,22 @@ static bool held_on_waking(void)
+@@ -496,6 +599,22 @@ static bool held_on_waking(void)
      return !got_event(MUSE_PTT_UP);
  }
  
@@ -6998,7 +7884,7 @@ index 38c7c9d..87af81f 100644
  static void drop_rec(void)
  {
      free(s_rec);
-@@ -639,7 +754,7 @@ static bool send_held(bool quiet)
+@@ -639,7 +758,7 @@ static bool send_held(bool quiet)
               h->tries + 1);
      if (!quiet) {
          muse_state_set_mode(MUSE_MODE_THINKING);
@@ -7007,7 +7893,7 @@ index 38c7c9d..87af81f 100644
      }
      muse_hatch_turn_begin();
      size_t sent = 0;
-@@ -665,7 +780,7 @@ static bool send_held(bool quiet)
+@@ -665,7 +784,7 @@ static bool send_held(bool quiet)
          s_next_send_us = 0;   /* the next one right away */
          s_send_backoff_us = RETRY_MIN_US;
          if (quiet) {
@@ -7016,7 +7902,7 @@ index 38c7c9d..87af81f 100644
          }
          return interrupted;
      } else if (++h->tries >= HELD_TRIES) {
-@@ -728,7 +843,7 @@ static bool finish_note(void)
+@@ -728,7 +847,7 @@ static bool finish_note(void)
          if (s_live && !fed) {
              /* Hatch is behind (still connecting, say): the rest from the kept note. */
              muse_state_set_mode(MUSE_MODE_THINKING);
@@ -7025,7 +7911,7 @@ index 38c7c9d..87af81f 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
-@@ -786,6 +901,256 @@ static bool can_record(void)
+@@ -786,6 +905,278 @@ static bool can_record(void)
      return true;
  }
  
@@ -7085,7 +7971,8 @@ index 38c7c9d..87af81f 100644
 +static void drain_speaker(void)
 +{
 +    static uint8_t junk[512];
-+    while (xStreamBufferReceive(s_speaker, junk, sizeof(junk), 0)) {
++    for (size_t n; (n = xStreamBufferReceive(s_speaker, junk, sizeof(junk), 0));) {
++        muse_live_played(n);   /* dropped counts as gone, for the caption */
 +    }
 +}
 +
@@ -7117,7 +8004,7 @@ index 38c7c9d..87af81f 100644
 +static void converse_live(void)
 +{
 +    if (!muse_live_configured()) {
-+        go_idle("SET AN XAI KEY");
++        go_idle(muse_live_no_key());
 +        return;
 +    }
 +    if (!s_speaker) {
@@ -7127,8 +8014,11 @@ index 38c7c9d..87af81f 100644
 +        go_idle("CAN'T START GROK");
 +        return;
 +    }
-+    ESP_LOGI(TAG, "live conversation: started");
++    ESP_LOGI(TAG, "live conversation: started%s", muse_settings_speaker_on() ? "" : " (speaker off)");
 +    show_live(MUSE_MODE_LISTENING);
++    if (!muse_settings_speaker_on()) {
++        muse_state_set_caption("SPEAKER OFF");   /* you'd hear nothing: the top-left button turns it on */
++    }
 +    /* The long press's pre-roll: the first words may already be in it. */
 +    for (size_t i = 0; i < s_pre_fill; i++) {
 +        pre_get(i, s_chunk);
@@ -7156,6 +8046,17 @@ index 38c7c9d..87af81f 100644
 +            break;
 +        }
 +        if (got_event(MUSE_PTT_DOWN)) {
++            if (playing || st.answering) {
++                /* A click while it speaks stops the reply; the conversation goes on. */
++                ESP_LOGI(TAG, "reply stopped (click)");
++                muse_live_stop_reply();
++                drain_speaker();
++                playing = false;
++                trial = 0;
++                tail = LIVE_TAIL_CHUNKS;
++                muse_live_set_playing(false);
++                continue;
++            }
 +            ESP_LOGI(TAG, "live conversation: ended (click) after %.0fs", (esp_timer_get_time() - t0) / 1e6);
 +            break;
 +        }
@@ -7166,7 +8067,7 @@ index 38c7c9d..87af81f 100644
 +            if (trial) {
 +                trial = 0;
 +                barge_ins++;
-+                ESP_LOGI(TAG, "barge-in: xAI heard you");
++                ESP_LOGI(TAG, "barge-in: the live voice heard you");
 +            }
 +        }
 +        if (trial && esp_timer_get_time() > trial) {
@@ -7174,7 +8075,7 @@ index 38c7c9d..87af81f 100644
 +            noises++;
 +            muse_live_discard_mic();
 +            muse_echo_reset(&echo);
-+            ESP_LOGI(TAG, "not a barge-in: xAI heard no speech");
++            ESP_LOGI(TAG, "not a barge-in: the live voice heard no speech");
 +        }
 +
 +        /* The speaker: a chunk of the reply, once enough of it is in hand. */
@@ -7188,6 +8089,7 @@ index 38c7c9d..87af81f 100644
 +        if (playing) {
 +            /* Whole chunks only while more is coming: a part-chunk padded out would be a gap in a word. */
 +            size_t n = have >= sizeof(out) || !st.answering ? xStreamBufferReceive(s_speaker, out, sizeof(out), 0) : 0;
++            muse_live_played(n);
 +            if (!n && st.answering) {
 +                short_of++;
 +            }
@@ -7201,8 +8103,9 @@ index 38c7c9d..87af81f 100644
 +                short_of = 0;
 +            } else {
 +                memset((uint8_t *)out + n, 0, sizeof(out) - n);   /* short of audio: silence, not stale DMA */
++                int den = st.voice == MUSE_RESPONDER_GEMINI ? LIVE_GAIN_DEN_GEMINI : LIVE_GAIN_DEN;
 +                for (size_t i = 0; i < MUSE_AUDIO_CHUNK; i++) {
-+                    out[i] /= trial ? LIVE_GAIN_DIV * LIVE_DUCK : LIVE_GAIN_DIV;
++                    out[i] = (int16_t)(out[i] * LIVE_GAIN_NUM / (trial ? den * LIVE_DUCK : den));
 +                }
 +                spk_db = muse_audio_dbfs(out, MUSE_AUDIO_CHUNK);
 +                muse_state_set_level(muse_audio_level(out, MUSE_AUDIO_CHUNK));
@@ -7224,7 +8127,10 @@ index 38c7c9d..87af81f 100644
 +            tail = playing ? tail : tail - 1;
 +            pre_put(s_chunk);
 +            float mic_db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
-+            if (muse_echo_feed(&echo, spk_db, mic_db)) {
++            /* Gemini can't be asked: what it would hear is mostly its own voice, ten dB over yours
++             * in this mic, and it takes its own words for yours. A click stops it instead. */
++            bool ask = st.voice != MUSE_RESPONDER_GEMINI;
++            if (muse_echo_feed(&echo, spk_db, mic_db) && ask) {
 +                /* Maybe you, maybe a noise: duck the reply and let xAI's voice detection hear it. */
 +                ESP_LOGI(TAG, "maybe a barge-in: mic %.0f dBFS, the speaker's echo %.0f", mic_db,
 +                         muse_echo_expected_db(&echo));
@@ -7251,9 +8157,10 @@ index 38c7c9d..87af81f 100644
 +        if (mode == MUSE_MODE_LISTENING) {
 +            muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
 +        }
++        muse_state_set_waiting(!playing && (st.muse || st.answering));
 +        muse_state_set_responder(playing      ? st.who
 +                                 : st.muse    ? MUSE_RESPONDER_MUSE
-+                                 : st.answering ? MUSE_RESPONDER_GROK
++                                 : st.answering ? st.voice
 +                                                : MUSE_RESPONDER_NONE);
 +
 +        /* Nobody's said anything, and nothing's going on, for a while: it's over. */
@@ -7271,6 +8178,7 @@ index 38c7c9d..87af81f 100644
 +    drain_speaker();
 +    muse_state_set_level(0);
 +    muse_state_set_responder(MUSE_RESPONDER_NONE);
++    muse_state_set_waiting(false);
 +    pre_reset();
 +    if (end[0]) {
 +        ESP_LOGW(TAG, "live conversation: ended (%s)", end);
@@ -7282,7 +8190,7 @@ index 38c7c9d..87af81f 100644
  static void voice_task(void *arg)
  {
      bool pending_down = false;
-@@ -806,7 +1171,6 @@ static void voice_task(void *arg)
+@@ -806,7 +1197,6 @@ static void voice_task(void *arg)
                  pending_down = send_held(asleep);
                  pre_reset();
                  if (!pending_down && !asleep && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
@@ -7290,7 +8198,7 @@ index 38c7c9d..87af81f 100644
                      go_idle("");
                  }
                  continue;
-@@ -854,6 +1218,29 @@ static void voice_task(void *arg)
+@@ -854,6 +1244,29 @@ static void voice_task(void *arg)
              }
              wake = ev.wake;
          }
@@ -7320,7 +8228,7 @@ index 38c7c9d..87af81f 100644
          if (wake && !held_on_waking()) {
              continue;   /* a tap: it only woke Muse */
          }
-@@ -864,7 +1251,8 @@ static void voice_task(void *arg)
+@@ -864,7 +1277,8 @@ static void voice_task(void *arg)
          }
          size_t held;
          char why[96];
@@ -7330,7 +8238,7 @@ index 38c7c9d..87af81f 100644
          pending_down = false;
          if (held < MIN_HELD_FRAMES && !wake) {
              muse_hatch_turn_cancel();
-@@ -880,8 +1268,9 @@ static void voice_task(void *arg)
+@@ -880,8 +1294,9 @@ static void voice_task(void *arg)
          }
          pending_down = finish_note();
          pre_reset();
@@ -7343,10 +8251,10 @@ index 38c7c9d..87af81f 100644
      }
 diff --git a/esp32/components/muse/muse_ws.c b/esp32/components/muse/muse_ws.c
 new file mode 100644
-index 0000000..b00b822
+index 0000000..0e69f24
 --- /dev/null
 +++ b/esp32/components/muse/muse_ws.c
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,486 @@
 +#include "muse_ws.h"
 +
 +#include <stdint.h>
@@ -7369,7 +8277,7 @@ index 0000000..b00b822
 +
 +#define RX_BUF 4096
 +#define HDR_LINE_MAX 1024
-+#define HEAD_MAX 768
++#define HEAD_MAX 1024
 +#define ERR_MAX 400
 +#define IO_TIMEOUT_US (20 * 1000000LL)
 +#define CONNECT_TIMEOUT_MS 10000
@@ -7781,8 +8689,9 @@ index 0000000..b00b822
 +                      "Connection: Upgrade\r\n"
 +                      "Sec-WebSocket-Key: %s\r\n"
 +                      "Sec-WebSocket-Version: 13\r\n"
-+                      "Authorization: Bearer %s\r\n\r\n",
-+                      path, host, (const char *)ws_key, key);
++                      "%s%s%s\r\n",
++                      path, host, (const char *)ws_key, key ? "Authorization: Bearer " : "", key ? key : "",
++                      key ? "\r\n" : "");
 +    bool sent = hl > 0 && hl < (int)sizeof(head) && conn_write(ws, (const uint8_t *)head, hl);
 +    memset(head, 0, sizeof(head));   /* it held the key */
 +    char line[HDR_LINE_MAX];
@@ -7834,7 +8743,7 @@ index 0000000..b00b822
 +}
 diff --git a/esp32/components/muse/muse_ws.h b/esp32/components/muse/muse_ws.h
 new file mode 100644
-index 0000000..e49e722
+index 0000000..4a98620
 --- /dev/null
 +++ b/esp32/components/muse/muse_ws.h
 @@ -0,0 +1,50 @@
@@ -7865,8 +8774,8 @@ index 0000000..e49e722
 +                       void *ctx);
 +
 +/*
-+ * Connects to wss://host/path with "Authorization: Bearer key", resuming the
-+ * last TLS session when it can. False if it couldn't; *status is the HTTP
++ * Connects to wss://host/path with "Authorization: Bearer key" (none if key is
++ * NULL: a key in the path, then), resuming the last TLS session when it can. False if it couldn't; *status is the HTTP
 + * status of a refused upgrade (0 if it never got that far), whose body is logged.
 + */
 +bool muse_ws_open(muse_ws_t *ws, const char *host, const char *path, const char *key, int *status);
@@ -9283,6 +10192,121 @@ index 0000000..f752369
 +
 +if __name__ == '__main__':
 +    unittest.main()
+diff --git a/esp32/tests/test_muse_resample.py b/esp32/tests/test_muse_resample.py
+new file mode 100644
+index 0000000..df135a1
+--- /dev/null
++++ b/esp32/tests/test_muse_resample.py
+@@ -0,0 +1,109 @@
++"""muse_resample.c, Gemini's 24 kHz speech to the speaker's 16 kHz."""
++import os
++from pathlib import Path
++import shlex
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++MUSE = ROOT / 'components/muse'
++
++HARNESS = r'''
++#include <assert.h>
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include "muse_resample.h"
++
++#define N 24000   /* 1 s */
++
++static int16_t in[N], whole[N], parts[N];
++
++static void tone(double hz, double amp)
++{
++    for (int i = 0; i < N; i++) in[i] = (int16_t)(amp * sin(2 * M_PI * hz * i / 24000.0));
++}
++
++/* Its level at `hz` by correlation, after the first 100 samples. */
++static double level(const int16_t *x, size_t n, double hz)
++{
++    double s = 0, c = 0;
++    for (size_t i = 100; i < n; i++) {
++        s += x[i] * sin(2 * M_PI * hz * i / 16000.0);
++        c += x[i] * cos(2 * M_PI * hz * i / 16000.0);
++    }
++    return 2 * sqrt(s * s + c * c) / (n - 100);
++}
++
++int main(int argc, char **argv)
++{
++    assert(argc == 2);
++    muse_resample_t r;
++    switch (atoi(argv[1])) {
++    case 0: {   /* 3 in, 2 out; a 1 kHz tone stays 1 kHz at nearly its level */
++        tone(1000, 10000);
++        muse_resample_init(&r);
++        size_t n = muse_resample_24k_16k(&r, in, N, whole);
++        assert(n >= 15990 && n <= 16000);
++        double l = level(whole, n, 1000);
++        fprintf(stderr, "1 kHz level %.0f\n", l);
++        assert(l > 9000 && l < 10100);
++        break;
++    }
++    case 1: {   /* in pieces of any size: the same samples as all at once */
++        tone(440, 8000);
++        muse_resample_init(&r);
++        size_t n = muse_resample_24k_16k(&r, in, N, whole);
++        muse_resample_init(&r);
++        size_t m = 0;
++        for (size_t i = 0, k = 1; i < N; k = k % 997 + 7) {
++            size_t take = i + k < N ? k : N - i;
++            m += muse_resample_24k_16k(&r, in + i, take, parts + m);
++            i += take;
++        }
++        assert(m == n);
++        for (size_t i = 0; i < n; i++) assert(parts[i] == whole[i]);
++        break;
++    }
++    case 2: {   /* 11 kHz (over 16 kHz's 8 kHz limit) is cut well down, not folded back loud */
++        tone(11000, 10000);
++        muse_resample_init(&r);
++        size_t n = muse_resample_24k_16k(&r, in, N, whole);
++        double alias = level(whole, n, 5000);   /* 11 kHz folds to 16 - 11 = 5 kHz */
++        fprintf(stderr, "alias %.0f\n", alias);
++        assert(alias < 3000);
++        break;
++    }
++    }
++    return 0;
++}
++'''
++
++
++class MuseResample(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cc = shlex.split(os.environ.get('CC', 'cc'))
++        if not shutil.which(cc[0]):
++            raise unittest.SkipTest('C compiler unavailable')
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.tmp.cleanup)
++        src = Path(cls.tmp.name) / 'resample_test.c'
++        src.write_text(HARNESS)
++        cls.binary = Path(cls.tmp.name) / 'resample_test'
++        subprocess.run([*cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(MUSE),
++                        str(src), str(MUSE / 'muse_resample.c'), '-lm', '-o', str(cls.binary)], check=True)
++
++    def run_case(self, case):
++        ran = subprocess.run([str(self.binary), str(case)], capture_output=True, text=True)
++        self.assertEqual(ran.returncode, 0, ran.stderr)
++
++    def test_a_tone_keeps_its_pitch_and_level(self): self.run_case(0)
++    def test_pieces_give_the_same_samples_as_the_whole(self): self.run_case(1)
++    def test_what_is_over_8_khz_is_cut_down(self): self.run_case(2)
++
++
++if __name__ == '__main__':
++    unittest.main()
 diff --git a/esp32/tests/test_muse_serial_chat.py b/esp32/tests/test_muse_serial_chat.py
 index 474a187..0ae066c 100644
 --- a/esp32/tests/test_muse_serial_chat.py
@@ -9542,7 +10566,7 @@ index 34013c8..03283b5 100644
  #define LV_EVENT_PRESSED 1
  #define LV_EVENT_RELEASED 2
 diff --git a/esp32/tests/test_stopwatch_controls.py b/esp32/tests/test_stopwatch_controls.py
-index 7546013..9a91c01 100644
+index 7546013..52b5fa7 100644
 --- a/esp32/tests/test_stopwatch_controls.py
 +++ b/esp32/tests/test_stopwatch_controls.py
 @@ -117,7 +117,7 @@ static bool s_power_down, s_power_swallow, s_talk_down;
@@ -9550,7 +10574,7 @@ index 7546013..9a91c01 100644
  static int shutdowns, ptt_releases, toggles, pokes;
  static muse_mode_t mode = MUSE_MODE_IDLE;
 -static struct { const char *power_button, *speaker_button; } board = {"red", "yellow"}, *muse_board = &board;
-+static struct { const char *power_button, *speaker_button; bool power_wakes_only; } board = {"red", "yellow", false}, *muse_board = &board;
++static struct { const char *power_button, *speaker_button; bool power_wakes_only, live_talk; } board = {"red", "yellow", false, false}, *muse_board = &board;
  bool muse_state_asleep(void) { return asleep; }
  static void set_asleep(bool value, const char *why) { (void)why; asleep = value; }
  void muse_state_poke(void) { ++pokes; }

@@ -22,6 +22,7 @@
  */
 
 #include "muse_pixel.h"
+#include "muse_board.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -404,7 +405,10 @@ static int clip_for(const muse_pose_t *p)
     }
     switch (p->mode) {
     case MUSE_MODE_BOOT:      return CLIP_WAKE;
-    case MUSE_MODE_LISTENING: return CLIP_LISTENING;
+    /* A live conversation listens most of the time, between every reply: its
+     * short, busy loop over and over is a lot to watch, so it's the calm idle
+     * one then (the ring and the mic dot say it's listening). */
+    case MUSE_MODE_LISTENING: return muse_board->live_talk ? CLIP_IDLE : CLIP_LISTENING;
     case MUSE_MODE_THINKING:  return CLIP_THINKING;
     case MUSE_MODE_SPEAKING:  return CLIP_SPEAKING;
     case MUSE_MODE_ERROR:     return CLIP_ERROR;
