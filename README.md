@@ -276,18 +276,22 @@ The avatar is a toy astronaut (`avatar/character/astronaut.jpg`) played as video
 state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind the same
 `muse_pixel.h` API, so the UI around it is unchanged.
 
-- **Clips:** `avatar/character/clips/` holds wake, idle, listening, thinking, speaking, happy, error
-  and goodbye `.mp4`s (16:9, the character centred on black). Wake and goodbye play once and hold
-  their last frame. The others loop.
-- **Tapping the character** waves back: 1.2 s of goodbye's wave (frames 32–61, before the eyes
-  close), held on its last frame until the tap reaction ends (`CLIP_WAVE` in
-  `avatar/character/muse_pixel.c`). The happy hop is kept for `[face-joy]`.
+- **Clips:** `avatar/character/clips/` holds the `.mp4`s (16:9, the character centred on black),
+  made from the prompts in `avatar/character/ANIMATION_PROMPTS.md`: all but wake and error start
+  and end on one neutral front pose, so any clip cuts into any other. Listening is also the idle
+  loop; every two loops of it while idle, bubbles or juggling plays once, in turn. While Muse
+  works on a question in a conversation, a nod, then checking (a wrist tap). Speaking, thinking,
+  happy (`[face-joy]`, a hop), sad (a head shake) and goodbye (a wave into sleep, cut at 3.8 s to
+  hold asleep) as before; wake and error are the old clips, resized.
+- **Tapping the character** waves back: goodbye's wave (0.7 s in, for 1.5 s), held on its last
+  frame until the tap reaction ends (`CLIP_WAVE` in `avatar/character/muse_pixel.c`).
 - **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow,
-  `avatar/requirements.txt`) crops each clip to
-  its centre square at 256 px and 24 fps, makes the near-black background true black, sharpens it a
-  little, and trims each loop to its best-matching start and end frames. It writes
-  `avatar/character/anims.pack` (baseline JPEGs at quality 85 plus an index, 7.64 MB; the format is
-  in the script's docstring). `avatar/quality-options.png` compares the sizes and qualities tried.
+  `avatar/requirements.txt`) crops each clip to its centre square at 256 px at the clip's own
+  frame rate (10 fps for the calm loops, 12 for the rest), makes the near-black background true
+  black, sharpens it a little, scales each to the listening clip's size, and cuts still frames
+  off the one-shots. It writes `avatar/character/anims.pack` (version 2: a clip count and each
+  clip's fps; baseline JPEGs at quality 80 plus an index, 7.54 MB) and refuses one that won't fit
+  the 7.81 MB partition; the format is in the script's docstring. `avatar/quality-options.png` compares the sizes and qualities tried.
 - **On the watch:** the pack lives in its own `anims` flash partition
   (`esp32/partitions_stopwatch.csv`: the SDK's table plus `anims` from `0x830000` to the end of the
   16 MB flash, 7.8 MB). Without the partition, or before `flash.sh` has written it, the avatar stays
@@ -488,19 +492,25 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   search (xAI's `web_search`, Gemini's Google Search), located at your city from the profile's
   `PLACE:` line: about a second, against Muse's ten or twenty.
 - **On screen:** only listening or speaking, never a waiting state or dots (the mic is open the
-  whole time); listening shows the calm idle clip, not the busy listening loop. The ring is a
-  steady 10 px white band while it listens or speaks: one that followed the voice redrew the
-  whole screen at every step and halved the frame rate. A yellow dot at 6 o'clock says it's
-  listening. Captions are the last four lines said, left-aligned in the bottom half on their
+  whole time), and no lit ring (one that followed the voice redrew the whole screen at every
+  step and halved the frame rate). A yellow dot at 6 o'clock says it's listening. Captions are the last four lines said, left-aligned in the bottom half on their
   scrim over the full-size character, kept with the audio as it plays. The voice's logo (Grok,
   Gemini or Muse, 20 px, up and left of the battery ring) has a spinner round it while we
   wait on it.
 - **A click** while it speaks stops the reply and the conversation goes on; while it listens,
   a click ends the conversation. The top-left button (the speaker) says "SPEAKER ON/OFF"
   mid-conversation too: with it off you hear nothing.
-- **It ends** on a click, or with nobody talking, nothing playing and nothing waiting on Grok or
-  Muse for 6 s after the press (8 s once there's been a reply), or if the connection fails, whose
-  reason stays up ("CAN'T REACH XAI", "XAI KEY REFUSED", "LOST XAI").
+- **It ends** on a click; when you say goodbye or you're clearly done (the voice says goodbye and
+  calls `end_conversation`; it closes once that's heard); with nobody talking, nothing playing
+  and nothing waiting on the voice or Muse for 5 s after the press (4 s once there's been a
+  reply); or if the connection fails, whose reason stays up ("CAN'T REACH XAI", "XAI KEY
+  REFUSED", "LOST XAI").
+- **Connecting:** a first TLS handshake with xAI or Google takes 5-8 s on the watch, a resumed
+  one a few hundred ms, so the watch does one in the background once Wi-Fi is up, on waking and
+  on a talk press (`muse_live_warm()`; no session, nothing billed).
+- **The profile** is asked of Muse two quiet minutes after a conversation (put off by any that
+  starts meanwhile): Muse takes one request at a time, and a question asked while the profile
+  was coming waited behind it.
 - **Two live voices:** xAI's Grok (the default) or Google's Gemini Live
   (`gemini-3.1-flash-live-preview`, voice Leda), chosen over serial with
   `>live_provider=gemini` or `>live_provider=xai` and kept in NVS. Gemini uses the stored Gemini
@@ -528,7 +538,7 @@ voice notes to Muse (`converse()` in `muse_voice.c`):
  idle ──long press (0.5 s)──► listening ──you speak, then 0.9 s quiet──► thinking ──► speaking
   ▲                               ▲                                                     │
   │                               └───────────────────── the reply ends ───────────────┘
-  └── a click (listening or speaking), or nobody speaks: 6 s after the press, 8 s after a reply
+  └── a click (listening or speaking), or nobody speaks: 5 s after the press, 4 s after a reply
 ```
 
 - **Each turn ends when you go quiet,** whether or not you're still holding the button.
@@ -542,7 +552,7 @@ voice notes to Muse (`converse()` in `muse_voice.c`):
   (`REPLY_STALL_US`), the watch ends the reply and the conversation and goes idle, logging
   `reply stalled`. While it speaks it logs `reply: Ns played` every 3 s, and xAI's worker logs
   `reply buffer full` if its 16 s buffer stays full for 2 s.
-- **It ends** when a turn hears nobody (6 s after the long press, 8 s after a reply: nothing is
+- **It ends** when a turn hears nobody (5 s after the long press, 4 s after a reply: nothing is
   sent), on a click of blue while it listens or speaks (a click stops the reply too), or when a
   note fails or is saved for later, whose caption stays up. A click while idle only says
   "Hold to talk".

@@ -23,7 +23,9 @@
 
 #include "muse_pixel.h"
 #include "muse_board.h"
+#include "muse_state.h"
 
+#include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -52,17 +54,25 @@ static const char *TAG = "muse_anim";
 #define WANT_MIX(w) ((w) >> 16 & 3)
 #define WANT_GEN(w) ((w) >> 18)
 
+/* The pack's clips, in make_anims.py's order. Version 1 packs had only the first 8;
+ * the others then stand in from those (open_pack). */
 enum { CLIP_WAKE, CLIP_IDLE, CLIP_LISTENING, CLIP_THINKING, CLIP_SPEAKING, CLIP_HAPPY, CLIP_ERROR,
-       CLIP_GOODBYE, CLIP_COUNT,
+       CLIP_GOODBYE, CLIP_SAD, CLIP_NOD, CLIP_CHECKING, CLIP_IDLE_A, CLIP_IDLE_B, CLIP_COUNT,
        CLIP_WAVE = CLIP_COUNT };   /* not in the pack: the wave out of goodbye, for a tap */
+#define CLIPS_V1 8
 
-/* Goodbye's wave, at 24 fps: the arm comes up 1.35 s in and is still waving at
- * 2.55 s, just before the eyes start to close for sleep. */
-#define WAVE_FIRST 32
-#define WAVE_FRAMES 30
+/* Goodbye's wave: the arm up and waving from WAVE_FROM_S for WAVE_S, before the
+ * eyes start to close for sleep (version 1's clip waved 1.35 s in, for 1.25 s). */
+#define WAVE_FROM_S 0.7f
+#define WAVE_S 1.5f
+#define WAVE_FROM_S_V1 1.35f
+#define WAVE_S_V1 1.25f
+
+/* Idle: a variation (bubbles, juggling) every few loops of the calm idle clip. */
+#define IDLE_LOOPS_BETWEEN 2
 
 typedef struct {
-    uint16_t first, count, flags, pad;
+    uint16_t first, count, flags, fps;   /* fps 0: the pack's */
 } clip_t;
 
 static const esp_partition_t *s_part;
@@ -131,36 +141,61 @@ static bool open_pack(void)
         ESP_LOGW(TAG, "can't read the animations");
         return false;
     }
-    if (memcmp(head, "MANI", 4) || rd16(head + 4) != 1) {
+    int version = rd16(head + 4);
+    if (memcmp(head, "MANI", 4) || (version != 1 && version != 2)) {
         ESP_LOGW(TAG, "no animations written yet (scripts/flash.sh writes them)");
         return false;
     }
     s_w = rd16(head + 6);
     s_h = rd16(head + 8);
     s_fps = rd16(head + 10);
-    s_frames = rd32(head + 12 + CLIP_COUNT * 8);
-    uint32_t index_end = sizeof(head) + s_frames * 8;
+    /* v1: 8 clips from byte 12; v2: a clip count at 12 and the clips from 16, each with its fps */
+    int nclips = version == 1 ? CLIPS_V1 : rd16(head + 12);
+    size_t table = version == 1 ? 12 : 16;
+    nclips = nclips < CLIP_COUNT ? nclips : CLIP_COUNT;
+    if (version == 2 && rd16(head + 12) > CLIP_COUNT) {
+        ESP_LOGW(TAG, "%d clips in the pack, %d known: the rest are left out", rd16(head + 12), CLIP_COUNT);
+    }
+    size_t count_at = table + (version == 1 ? CLIPS_V1 : rd16(head + 12)) * 8;
+    uint8_t fc[4];
+    if (esp_partition_read(part, count_at, fc, 4) != ESP_OK) {
+        return false;
+    }
+    s_frames = rd32(fc);
+    uint32_t index_end = count_at + 4 + s_frames * 8;
     if (s_w <= 0 || s_h <= 0 || s_w > MAX_SIDE || s_h > MAX_SIDE || !s_fps || !s_frames || s_frames > 0xffff ||
         index_end > part->size) {
         ESP_LOGW(TAG, "animation header out of range");
         return false;
     }
-    for (int c = 0; c < CLIP_COUNT; c++) {
-        const uint8_t *e = head + 12 + c * 8;
-        s_clips[c] = (clip_t){ rd16(e), rd16(e + 2), rd16(e + 4), 0 };
+    for (int c = 0; c < nclips; c++) {
+        const uint8_t *e = head + table + c * 8;
+        s_clips[c] = (clip_t){ rd16(e), rd16(e + 2), rd16(e + 4), version == 1 ? 0 : rd16(e + 6) };
         if (!s_clips[c].count || s_clips[c].first + s_clips[c].count > s_frames) {
             ESP_LOGW(TAG, "clip %d out of range", c);
             return false;
         }
     }
-    /* Played once, holding its last frame (arm up, eyes open) until the tap
-     * reaction is over. A shorter goodbye just waves for what it has. */
+    /* What a version 1 pack hasn't: sad was the error face, nod and the idle
+     * variations the idle clip, checking the thinking one. */
+    static const int8_t STAND_IN[CLIP_COUNT] = {
+        [CLIP_SAD] = CLIP_ERROR, [CLIP_NOD] = CLIP_IDLE, [CLIP_CHECKING] = CLIP_THINKING,
+        [CLIP_IDLE_A] = CLIP_IDLE, [CLIP_IDLE_B] = CLIP_IDLE,
+    };
+    for (int c = nclips; c < CLIP_COUNT; c++) {
+        s_clips[c] = s_clips[STAND_IN[c]];
+    }
+    /* Played once, holding its last frame (arm up) until the tap reaction is
+     * over. A shorter goodbye just waves for what it has. */
     const clip_t *bye = &s_clips[CLIP_GOODBYE];
-    int from = bye->count > WAVE_FIRST ? WAVE_FIRST : 0;
-    int n = bye->count - from < WAVE_FRAMES ? bye->count - from : WAVE_FRAMES;
-    s_clips[CLIP_WAVE] = (clip_t){ bye->first + from, n, 1, 0 };
+    int bye_fps = bye->fps ? bye->fps : s_fps;
+    int from = (int)((version == 1 ? WAVE_FROM_S_V1 : WAVE_FROM_S) * bye_fps);
+    int len = (int)((version == 1 ? WAVE_S_V1 : WAVE_S) * bye_fps);
+    from = bye->count > from ? from : 0;
+    int n = bye->count - from < len ? bye->count - from : len;
+    s_clips[CLIP_WAVE] = (clip_t){ bye->first + from, n, 1, bye->fps };
     s_index = heap_caps_malloc(s_frames * 8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_index || esp_partition_read(part, sizeof(head), s_index, s_frames * 8) != ESP_OK) {
+    if (!s_index || esp_partition_read(part, count_at + 4, s_index, s_frames * 8) != ESP_OK) {
         ESP_LOGW(TAG, "can't read the frame index");
         return false;
     }
@@ -200,7 +235,7 @@ static bool open_pack(void)
         return false;
     }
     s_ok = true;
-    ESP_LOGI(TAG, "%u frames, %dx%d at %d fps", (unsigned)s_frames, s_w, s_h, s_fps);
+    ESP_LOGI(TAG, "%u frames, %dx%d, %d clips (pack version %d)", (unsigned)s_frames, s_w, s_h, nclips, version);
     return true;
 }
 
@@ -375,12 +410,17 @@ static void decoder(void *arg)
  * Idle right after a reply replays its last face once as the ending
  * (muse_state.h), goodnight included, then gives way to the idle clip.
  */
+static inline int clip_fps(const clip_t *c)
+{
+    return c->fps ? c->fps : s_fps;
+}
+
 static int reaction_clip(const muse_pose_t *p)
 {
     static const int8_t CLIP_OF[] = {
         [MUSE_REACT_JOY] = CLIP_HAPPY,
         [MUSE_REACT_THINKING] = CLIP_THINKING,
-        [MUSE_REACT_SAD] = CLIP_ERROR,
+        [MUSE_REACT_SAD] = CLIP_SAD,
         [MUSE_REACT_GOODNIGHT] = CLIP_GOODBYE,
     };
     bool ending = p->mode == MUSE_MODE_IDLE;
@@ -389,7 +429,7 @@ static int reaction_clip(const muse_pose_t *p)
         return -1;
     }
     int clip = CLIP_OF[p->reaction];
-    float secs = (float)s_clips[clip].count / s_fps;
+    float secs = (float)s_clips[clip].count / clip_fps(&s_clips[clip]);
     secs = secs > REACT_MIN_SECS ? secs : REACT_MIN_SECS;
     return (!ending && p->reaction == MUSE_REACT_GOODNIGHT) || p->reaction_t < secs ? clip : -1;
 }
@@ -403,12 +443,44 @@ static int clip_for(const muse_pose_t *p)
     if (p->happy > 0.2f && p->mode != MUSE_MODE_ERROR) {
         return CLIP_WAVE;   /* a tap waves back; [face-joy] keeps the hop */
     }
+    /* Waiting on Muse in a conversation: a nod ("got it"), then checking the wrist. */
+    static float s_checking_since = -1;
+    if (p->mode == MUSE_MODE_LISTENING && muse_state_waiting() && muse_state_responder() == MUSE_RESPONDER_MUSE) {
+        if (s_checking_since < 0) {
+            s_checking_since = p->t;
+        }
+        const clip_t *nod = &s_clips[CLIP_NOD];
+        return p->t - s_checking_since < (float)nod->count / clip_fps(nod) ? CLIP_NOD : CLIP_CHECKING;
+    }
+    s_checking_since = -1;
+    /* Idle: the calm loop, and every IDLE_LOOPS_BETWEEN loops of it a variation,
+     * in turn, starting on the loop's boundary (both start and end on the same pose). */
+    static float s_idle_since = -1, s_var_until = -1;
+    static int s_var;
+    if (p->mode == MUSE_MODE_IDLE) {
+        if (s_idle_since < 0) {
+            s_idle_since = p->t;
+        }
+        if (p->t < s_var_until) {
+            return s_var;
+        }
+        const clip_t *idle = &s_clips[CLIP_IDLE];
+        float loop = (float)idle->count / clip_fps(idle);
+        float in = p->t - s_idle_since;
+        if (s_clips[CLIP_IDLE_A].first != idle->first && in >= loop * IDLE_LOOPS_BETWEEN &&
+            fmodf(in, loop) < 0.15f) {
+            s_var = s_var == CLIP_IDLE_A ? CLIP_IDLE_B : CLIP_IDLE_A;
+            const clip_t *v = &s_clips[s_var];
+            s_var_until = p->t + (float)v->count / clip_fps(v);
+            s_idle_since = s_var_until;   /* the next one after more loops */
+            return s_var;
+        }
+    } else {
+        s_idle_since = s_var_until = -1;
+    }
     switch (p->mode) {
     case MUSE_MODE_BOOT:      return CLIP_WAKE;
-    /* A live conversation listens most of the time, between every reply: its
-     * short, busy loop over and over is a lot to watch, so it's the calm idle
-     * one then (the ring and the mic dot say it's listening). */
-    case MUSE_MODE_LISTENING: return muse_board->live_talk ? CLIP_IDLE : CLIP_LISTENING;
+    case MUSE_MODE_LISTENING: return CLIP_LISTENING;
     case MUSE_MODE_THINKING:  return CLIP_THINKING;
     case MUSE_MODE_SPEAKING:  return CLIP_SPEAKING;
     case MUSE_MODE_ERROR:     return CLIP_ERROR;
@@ -470,7 +542,7 @@ void muse_pixel_render(const muse_pose_t *p)
         s_since = p->t;
     }
     const clip_t *c = &s_clips[clip];
-    int t = (int)((p->t - s_since) * s_fps);
+    int t = (int)((p->t - s_since) * clip_fps(c));
     int n = c->flags & 1 ? (t < c->count ? t : c->count - 1) : t % c->count;
     int mix = s_fade && t < FADE_FRAMES ? FADE_FRAMES - t : 0;
     int want = WANT(c->first + n, mix, s_gen);
