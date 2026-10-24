@@ -455,20 +455,39 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   calendar, notes, shopping) it hands to Muse with its `ask_muse` tool, as a typed Muse turn
   with a note on answering for the voice and the face tags it may use. Muse's answer, once the
   conversation is quiet, plays its faces as reactions and is read out word for word in Grok's
-  voice (`force_message`). Grok can show a face itself with `set_mood`.
+  voice (`force_message`), after Grok says "Let me check with Muse." Grok shows faces itself
+  with `set_mood` when a reply has a clear feeling.
+- **What Grok knows about you:** a short profile (name, city, people, projects, how you like
+  answers) and your timezone, kept in NVS. After a conversation, if it's missing or a day old,
+  the watch quietly asks Muse for it again (a typed turn you'll see in Muse's history). Grok gets
+  it at the start of each conversation, with the local date and time (from xAI's `Date` header:
+  the watch has no clock). `>profile?` prints it, `>profile=...` sets your own (never replaced;
+  a first line `TZ: <POSIX TZ>` sets the timezone), `>profile=` goes back to asking Muse.
 - **Who's answering:** Grok's or Muse's logo (22 px, `avatar/icons`, made by
   `avatar/make_icons.py` and copied in by `build.sh`) shows just left of the battery ring while
   that one answers, and Muse's while Muse is working on a question.
 - **Turns** end by xAI's voice detection. Every 20 ms the voice task plays a chunk of the reply
   and reads one from the mic; the mic streams to xAI except while the speaker plays and for
   300 ms after.
+- **On the wire** (following xAI's Voice Agent guide): audio goes both ways as binary WebSocket
+  frames, no base64. The mic goes up as 8 kHz G.711 mu-law (11 KB/s): the watch's 2.4 GHz upload
+  can fall to about 10 KB/s, under the 43 KB/s base64 16 kHz PCM needs. Replies come down as
+  16 kHz PCM, 6 dB quieter than sent before the speaker's boost. `reasoning.effort` is `none`
+  (Grok answers sooner; Muse does the thinking), and transcription gets an English hint and
+  key terms. Up to 4 s of mic is kept while connecting; later, more than 1 s behind is dropped.
+  The log shows `mic to xAI: 21.0s so far (0.0s dropped behind)` every 5 s and any send over
+  250 ms.
 - **Talking over a reply** (barge-in): with no echo canceller on the board, `muse_echo.c` learns
   how loud the speaker comes back in the mic (on the StopWatch, about as loud as it's sent) from
-  the first 500 ms of each reply, then takes 120 ms of mic 10 dB over that for a voice. Grok
-  stops, and what you said just before goes to xAI. At full volume the echo is too loud to beat,
-  so it works best in Grok's quieter moments. The log says
-  `barge-in: mic -9 dBFS, the speaker's echo -21` and, after each reply,
-  `the mic hears the speaker at +0.0 dB`.
+  the first 500 ms of each reply, and 200 ms of mic 10 dB over that may be a voice. The reply is
+  ducked 12 dB and the mic goes to xAI for 1.5 s: if xAI's voice detection hears speech, Grok
+  stops (xAI cancels it itself); if not, it was a noise, the reply goes on and that audio is
+  discarded. The log says `maybe a barge-in`, then `barge-in: xAI heard you` or
+  `not a barge-in: xAI heard no speech`, and after each reply how loud the mic heard the speaker.
+- **On screen:** only listening or speaking, never a waiting state or dots (the mic is open the
+  whole time). The ring is a steady 10 px white band while it listens or speaks: one that
+  followed the voice redrew the whole screen at every step and halved the frame rate. Captions
+  sit on their scrim over the full-size character, which doesn't shrink for them.
 - **It ends** on a click, or with nobody talking, nothing playing and nothing waiting on Grok or
   Muse for 6 s after the press (8 s once there's been a reply), or if the connection fails, whose
   reason stays up ("CAN'T REACH XAI", "XAI KEY REFUSED", "LOST XAI").

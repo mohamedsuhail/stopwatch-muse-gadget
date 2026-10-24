@@ -328,19 +328,21 @@ static bool decode(int want)
     if (mix) {
         blend_hold(mix);
     }
-    /* How long decodes (and blends) take, once over the first few seconds:
-     * past a frame's time, frames show late. */
-    static int s_count, s_late;
+    /* How long decodes (and blends) take, every 10 s: past a frame's time,
+     * frames show late. Logged after boot, and whenever Muse isn't idle. */
+    static int s_count, s_late, s_windows;
     static int64_t s_total, s_max;
-    if (s_count < 10 * s_fps) {
-        int64_t us = esp_timer_get_time() - t0;
-        s_total += us;
-        s_max = us > s_max ? us : s_max;
-        s_late += us > 1000000 / s_fps;
-        if (++s_count == 10 * s_fps) {
+    int64_t us = esp_timer_get_time() - t0;
+    s_total += us;
+    s_max = us > s_max ? us : s_max;
+    s_late += us > 1000000 / s_fps;
+    if (++s_count == 10 * s_fps) {
+        if (!s_windows++ || muse_state_mode(NULL) != MUSE_MODE_IDLE) {
             ESP_LOGI(TAG, "%d frames decode in %d ms on average, %d ms at most; %d took longer than a frame",
                      s_count, (int)(s_total / s_count / 1000), (int)(s_max / 1000), s_late);
         }
+        s_count = s_late = 0;
+        s_total = s_max = 0;
     }
     return true;
 }
@@ -411,18 +413,19 @@ static int clip_for(const muse_pose_t *p)
     }
 }
 
-/* Timing, logged once over five seconds from 14 s after boot (past Wi-Fi and
- * the Muse connection, before the 30 s auto-sleep): how often the UI ticks, and
- * how long scaling the frame to the canvas takes per tick. */
+/* Timing, over five seconds from 14 s after boot (past Wi-Fi and the Muse
+ * connection, before the 30 s auto-sleep) and every five seconds Muse isn't
+ * idle: how often the UI ticks, and how long scaling the frame takes per tick. */
 static int64_t s_scale_us;
 
 static void log_ticks(void)
 {
-    static int s_ticks;
+    static int s_ticks, s_windows;
     static int64_t s_first, s_last, s_gap_max, s_scale_total, s_scale_max;
     int64_t now = esp_timer_get_time();
-    if (s_ticks >= 5 * s_fps || now < 14000000) {
+    if (now < 14000000 || (s_windows && muse_state_mode(NULL) == MUSE_MODE_IDLE)) {
         s_scale_us = 0;
+        s_ticks = 0;
         return;
     }
     if (s_ticks) {
@@ -438,6 +441,9 @@ static void log_ticks(void)
         ESP_LOGI(TAG, "%d ticks at %d ms apart on average, %d ms at most; scaling takes %d ms a tick, %d ms at most",
                  s_ticks, (int)((now - s_first) / (s_ticks - 1) / 1000), (int)(s_gap_max / 1000),
                  (int)(s_scale_total / (s_ticks - 1) / 1000), (int)(s_scale_max / 1000));
+        s_windows++;
+        s_ticks = 0;
+        s_gap_max = s_scale_total = s_scale_max = 0;
     }
 }
 
