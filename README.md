@@ -18,7 +18,7 @@ On top of the stock SDK, this repo adds:
   (`avatar/character/`), drawn at 384 px. The older pixel-art astronaut is still there
   (`avatar/muse_pixel.c`, `AVATAR=pixel`).
 - **A cleaner screen.** Black and white throughout: white Montserrat text on soft dark bands, and
-  no battery or Wi-Fi on the face (`.hide_battery_ring`; both are in Settings): at 2 o'clock, a
+  no battery or Wi-Fi on the face (`.hide_battery_ring`; both are in Settings): at 3 o'clock, a
   bubble with the live voice's logo while it answers. There's no state word, since the clips show
   the state.
   The rim icons and the top status line are gone, and a worn white painter's-tape "MOBOT" label sits
@@ -368,7 +368,8 @@ Nothing leaves the watch until you hold the blue button.
 ### Screen
 
 **Battery and Wi-Fi ring.** A ring at 2 o'clock with the Wi-Fi symbol inside, above where reply
-text starts. It's hidden while the pairing arrow shows, since that points the same way.
+text starts. It's hidden while the pairing arrow shows, since that points the same way. Charm
+hides it for good (`.hide_battery_ring`: a clear face, battery and Wi-Fi in Settings).
 
 - **Charge:** the ring's fill on a dark grey track. White above 30%, yellow from 15 to 30%, red
   below 15%, green while charging. Full on USB is white (the charger keeps topping up at 100%).
@@ -482,8 +483,9 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   `TZ: <POSIX TZ>` and `PLACE: City, Region, CC` set the timezone and place), and `>profile=`
   forgets it, place included, until Muse is next asked.
 - **Who's answering:** Grok's, Gemini's or Muse's logo (20 px, `avatar/icons`, made by
-  `avatar/make_icons.py` and copied in by `build.sh`) in a soap bubble at 2 o'clock, where the
-  battery ring would be, while that one answers, and Muse's while Muse is working on a question
+  `avatar/make_icons.py` and copied in by `build.sh`) in a 60 px soap bubble at 3 o'clock, 20 px
+  in from the screen's edge (about a Pixel Watch app's margin; at 24 the astronaut's happy hop
+  would touch it), while that one answers, and Muse's while Muse is working on a question
   (a spinner runs round the bubble's rim while we wait). The bubble blows up in 0.2 s; when
   nobody has been answering for 0.15 s it bursts: the logo goes, the bubble swells and fades,
   and eight droplets fly out, over 0.3 s (`bubble_tick()` in `muse_ui.c`).
@@ -523,7 +525,7 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   ends). It's on the face, so it slides off with it to settings; the bubble just goes.
   Captions are the last three lines said (about 22 letters wide: that low, the round screen is
   narrow), left-aligned a little above the arc on their scrim over the full-size character, kept with the
-  audio as it plays. The voice's logo is in its bubble at 2 o'clock.
+  audio as it plays. The voice's logo is in its bubble at 3 o'clock.
 - **A click** while it speaks stops the reply and the conversation goes on; while it listens,
   a click ends the conversation. The top-left button (the speaker) says "SPEAKER ON/OFF"
   mid-conversation too: with it off you hear nothing.
