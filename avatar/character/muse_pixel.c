@@ -434,8 +434,28 @@ static int reaction_clip(const muse_pose_t *p)
     return (!ending && p->reaction == MUSE_REACT_GOODNIGHT) || p->reaction_t < secs ? clip : -1;
 }
 
+static bool s_trick_again;   /* a trick began afresh: its clip restarts even if it's showing already */
+
 static int clip_for(const muse_pose_t *p)
 {
+    /* A trick the live voice was asked for: once through, over anything but an error. */
+    float trick_t;
+    muse_trick_t trick = muse_state_trick(&trick_t);
+    static float s_last_trick_t = 1e9f;
+    s_trick_again = trick > MUSE_TRICK_NONE && trick_t < s_last_trick_t;   /* its clock went back */
+    s_last_trick_t = trick > MUSE_TRICK_NONE ? trick_t : 1e9f;
+    if (trick > MUSE_TRICK_NONE && trick <= MUSE_TRICK_WAVE && p->mode != MUSE_MODE_ERROR &&
+        p->mode != MUSE_MODE_OFF && p->mode != MUSE_MODE_BOOT) {
+        static const int8_t CLIP_OF_TRICK[] = {
+            [MUSE_TRICK_BUBBLES] = CLIP_IDLE_A,
+            [MUSE_TRICK_JUGGLE] = CLIP_IDLE_B,
+            [MUSE_TRICK_WAVE] = CLIP_WAVE,
+        };
+        int clip = CLIP_OF_TRICK[trick];
+        if (trick_t < (float)s_clips[clip].count / clip_fps(&s_clips[clip])) {
+            return clip;
+        }
+    }
     int face = reaction_clip(p);
     if (face >= 0) {
         return face;
@@ -535,7 +555,7 @@ void muse_pixel_render(const muse_pose_t *p)
     static float s_since;
     static bool s_fade;
     int clip = clip_for(p);
-    if (clip != s_clip) {
+    if (clip != s_clip || s_trick_again) {
         s_fade = s_clip >= 0;
         s_gen += s_fade;
         s_clip = clip;

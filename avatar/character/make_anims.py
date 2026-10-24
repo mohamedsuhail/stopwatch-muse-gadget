@@ -27,8 +27,8 @@ from PIL import Image, ImageChops, ImageFilter, ImageStat
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIPS_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "clips")
 OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "anims.pack")
-SIZE, FPS, QUALITY = 256, 12, 80   # 1.5x to the watch's 384 px; 12 fps (10 for calm loops) and q80 to fit 13 clips
-PARTITION = 0x7D0000                # partitions_stopwatch.csv's "anims"
+SIZE, FPS, QUALITY = 256, 24, 85   # 1.5x to the watch's 384 px; q85; speaking at 24 fps, joy/sad/thinking 15, the rest 8-12
+PARTITION = 0x9D0000                # partitions_stopwatch.csv's "anims" (3 MB app slots)
 SHARPEN = ImageFilter.UnsharpMask(radius=1.0, percent=80, threshold=2)   # offsets the watch's blow-up
 REFERENCE = "listening.mp4"         # the neutral pose every clip starts and ends on
 
@@ -41,16 +41,16 @@ CLIPS = [
     ("wake",          "wake.mp4",          12, True,  None),
     ("idle",          "listening.mp4",     10, False, "loop"),        # calm: the listening loop
     ("listening",     "listening.mp4",     10, False, "loop"),
-    ("thinking",      "thinking.mp4",      12, False, "loop"),
-    ("speaking",      "speaking.mp4",      12, False, "loop"),
-    ("happy",         "happy.mp4",         12, False, "still"),
-    ("error",         "error.mp4",         12, False, "loop-best"),
+    ("thinking",      "thinking.mp4",      15, False, "loop"),
+    ("speaking",      "speaking.mp4",      24, False, "loop"),
+    ("happy",         "happy.mp4",         15, False, "still"),
+    ("error",         "error.mp4",         10, False, "loop-best"),
     ("goodbye",       "goodbye.mp4",       12, True,  3.8),           # holds asleep, not the neutral end
-    ("sad",           "sad.mp4",           12, False, "still"),
+    ("sad",           "sad.mp4",           15, False, "still"),
     ("nod",           "nod.mp4",           12, True,  "still"),
     ("checking",      "checking.mp4",      10, False, "loop"),
     ("idle_bubbles",  "idle_bubbles.mp4",  10, True,  "loop"),
-    ("idle_juggling", "idle_juggling.mp4", 10, True,  "loop"),
+    ("idle_juggling", "idle_juggling.mp4", 8, True,  "loop"),
 ]
 
 

@@ -195,15 +195,22 @@ take_sdk_lock "scripts/flash.sh $PORT"
 
 backup_factory "$PORT"
 
-# The character's clips go in their own partition (partitions_stopwatch.csv,
-# "anims" at 0x830000), written only when what's there differs. They go first,
+# The character's clips go in their own partition ("anims" in the SDK's
+# partitions_stopwatch.csv, the table flashed below), written only when what's there differs. They go first,
 # leaving the chip in its bootloader (--after no-reset): the firmware flash
 # below then resets it once. Reset again by a later esptool run, a firmware
 # that had just started booting could be cut off mid token refresh, after
 # Muse's server had replaced the token but before the watch saved the new one,
 # and the next boot is rejected and unpairs.
 ANIMS="$REPO_ROOT/avatar/character/anims.pack"
-ANIMS_OFFSET=0x830000
+# Where that table puts it, not a number kept here: an SDK patched for an older layout would
+# otherwise get the pack written over its firmware slot.
+TABLE="$SDK_DIR/esp32/partitions_stopwatch.csv"
+read -r ANIMS_OFFSET ANIMS_SIZE < <(awk -F, '{ gsub(/[ \t]/, "") } $1 == "anims" { print $4, $5 }' "$TABLE")
+[ -n "${ANIMS_OFFSET:-}" ] || die "no anims partition in $TABLE. Run scripts/build.sh first."
+if [ -f "$ANIMS" ] && [ "$(wc -c < "$ANIMS")" -gt $((ANIMS_SIZE)) ]; then
+    die "anims.pack doesn't fit $TABLE's anims partition ($ANIMS_SIZE bytes): run scripts/build.sh first, for this layout."
+fi
 if [ -f "$ANIMS" ]; then
     if "${ESPTOOL[@]}" --chip esp32s3 -p "$PORT" --after no-reset verify-flash "$ANIMS_OFFSET" "$ANIMS" >/dev/null 2>&1; then
         log "animations already up to date"

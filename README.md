@@ -18,7 +18,9 @@ On top of the stock SDK, this repo adds:
   (`avatar/character/`), drawn at 384 px. The older pixel-art astronaut is still there
   (`avatar/muse_pixel.c`, `AVATAR=pixel`).
 - **A cleaner screen.** Black and white throughout: white Montserrat text on soft dark bands, and
-  Wi-Fi inside a battery ring at 2 o'clock. There's no state word, since the clips show the state.
+  no battery or Wi-Fi on the face (`.hide_battery_ring`; both are in Settings): at 2 o'clock, a
+  bubble with the live voice's logo while it answers. There's no state word, since the clips show
+  the state.
   The rim icons and the top status line are gone, and a worn white painter's-tape "MOBOT" label sits
   across the top-left.
 - **Battery savings.** Shorter sleep timeouts, plus an automatic power-off when the watch has been
@@ -91,7 +93,8 @@ gone is taken over.
 `backups/stopwatch-factory-<date>.bin` (`esptool --chip esp32s3 -p PORT read-flash 0 0x1000000 ...`)
 and writes a `.sha256` checksum next to it before flashing. Later runs detect the existing backup and
 skip straight to flashing, so you keep one golden copy of the factory image. Then it writes the
-avatar clips (`avatar/character/anims.pack`, about 7.6 MB) to the `anims` partition at `0x830000`,
+avatar clips (`avatar/character/anims.pack`, about 9.7 MB) to the `anims` partition (`0x630000`,
+read from the SDK's partition table, refusing a pack that doesn't fit it),
 skipping them when the chip already has them (`esptool verify-flash`), and flashes the firmware with
 `tools/muse/board.sh flash stopwatch [PORT]`. The clips go first and leave the chip in its bootloader,
 so the firmware flash resets it only once. A second reset a moment into booting can cut off the
@@ -168,7 +171,7 @@ The watch's light shows the pairing state:
 
 | Button | Position | Awake | Asleep |
 | --- | --- | --- | --- |
-| Blue | top-right | Hold to talk | Hold: wakes it and listens. Click: ignored |
+| Blue | top-right | Hold to talk (a click shows an arrow at it: "Hold to talk") | Hold: wakes it and listens. Click: ignored |
 | Yellow | top-left | Speaker on/off (**SPEAKER ON** / **SPEAKER OFF** on screen) | Ignored |
 | Red | bottom-left | Click: power on/reset. Double-click: power off | Wakes the watch |
 
@@ -287,14 +290,15 @@ state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind 
   frame until the tap reaction ends (`CLIP_WAVE` in `avatar/character/muse_pixel.c`).
 - **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow,
   `avatar/requirements.txt`) crops each clip to its centre square at 256 px at the clip's own
-  frame rate (10 fps for the calm loops, 12 for the rest), makes the near-black background true
-  black, sharpens it a little, scales each to the listening clip's size, and cuts still frames
-  off the one-shots. It writes `avatar/character/anims.pack` (version 2: a clip count and each
-  clip's fps; baseline JPEGs at quality 80 plus an index, 7.54 MB) and refuses one that won't fit
-  the 7.81 MB partition; the format is in the script's docstring. `avatar/quality-options.png` compares the sizes and qualities tried.
+  frame rate (speaking 24 fps; joy, sad and thinking 15; nod, goodnight and wake 12; the calm
+  loops 8-10), makes the near-black background true black, sharpens it a little, scales each to
+  the listening clip's size, and cuts still frames off the one-shots. It writes
+  `avatar/character/anims.pack` (version 2: a clip count and each clip's fps; baseline JPEGs at
+  quality 85 plus an index, 9.70 MB) and refuses one that won't fit the 9.81 MB partition; the
+  format is in the script's docstring. All 13 clips at 24 fps would need 14 MB. `avatar/quality-options.png` compares the sizes and qualities tried.
 - **On the watch:** the pack lives in its own `anims` flash partition
-  (`esp32/partitions_stopwatch.csv`: the SDK's table plus `anims` from `0x830000` to the end of the
-  16 MB flash, 7.8 MB). Without the partition, or before `flash.sh` has written it, the avatar stays
+  (`esp32/partitions_stopwatch.csv`: 3 MB app slots, then `anims` from `0x630000` to the end of the
+  16 MB flash, 9.81 MB; the firmware is about 2.5 MB). Without the partition, or before `flash.sh` has written it, the avatar stays
   black and the log says why.
 - **Playback:** the UI ticks every 42 ms (`.frame_ms = 42`, 24 Hz), one tick per frame. A
   background task decodes the next frame with Espressif's SIMD JPEG decoder (`esp_new_jpeg`, about
@@ -429,7 +433,8 @@ buttons. The yellow button still briefly shows "Speaker on" or "Speaker off".
 **Tape label.** `.tape_label = true` draws "MOBOT" on worn white painter's tape across the
 top-left: grime, smudges, rubbed marker, and the **build number** in blue ballpoint, like
 `#28·23·10` (build 28, made 23 Oct). It's one image drawn over everything, like tape on the glass.
-The tape and the battery ring are hidden on the settings pages.
+The tape, the battery ring (on boards that show it) and the voice's bubble are hidden on the
+settings pages.
 
 - **Build number:** `#N` is the number of commits on the branch, with a `+` when `patches/`,
   `avatar/` or `scripts/` have uncommitted changes, so a test build can't pass for a committed one.
@@ -454,57 +459,83 @@ a spoken conversation with xAI's live voice (`wss://api.x.ai/v1/realtime`, `muse
 than sending voice notes to Muse. It uses the xAI key already stored for speech (`>xai_key=...`);
 without one the watch says "SET AN XAI KEY". It connects only for the conversation.
 
-- **Grok talks; Muse knows.** Grok (voice `iris`, your Muse persona, never mentioning the device)
-  answers small talk and general questions itself. Anything personal (projects, plans, tasks,
-  calendar, notes, shopping) it hands to Muse with its `ask_muse` tool, as a typed Muse turn
-  with a note on answering for the voice and the face tags it may use. Muse's answer, once the
-  conversation is quiet, plays its faces as reactions and is read out word for word in Grok's
-  voice (`force_message`), after Grok says "Let me check with Muse." Grok shows faces itself
+- **Grok talks; Muse does the rest.** Grok (voice `iris`, your Muse persona, never mentioning
+  the device; if asked, it's Charm) answers only small talk and simple facts a quick web search
+  answers. Everything else goes to Muse (Mobot, your agent in Muse, with its connectors: calendar
+  and tasks, email and messages, documents, the home's Hue lights, health, money, shopping,
+  travel, music and social, research, family logistics, projects and goals) with its `ask_muse`
+  tool, as a typed Muse turn, with your exact words, names, dates and constraints, and never
+  passwords, card numbers or codes; Muse asks you before it sends, buys, books or deletes. Muse's
+  answer, once the conversation is quiet, plays its faces as reactions and is read out word for
+  word in Grok's voice (`force_message`), after Grok says "Let me check." Grok shows faces itself
   with `set_mood` when a reply has a clear feeling.
+- **Tricks:** ask for something fun ("blow some bubbles", "juggle", "wave", "do a trick") and the
+  voice does it itself with `do_trick` (never Muse): the character blows bubbles (6 s), juggles
+  planets (8 s) or waves, once through, while the voice says a playful line. Unlike a face, a trick
+  isn't cut short when the conversation goes back to listening. The log says `trick: bubbles`.
 - **What Grok knows about you:** a short profile (name, city, people, projects, how you like
   answers) and your timezone, kept in NVS. After a conversation, if it's missing or a day old,
   the watch quietly asks Muse for it again (a typed turn you'll see in Muse's history). Grok gets
   it at the start of each conversation, with the local date and time (from xAI's `Date` header:
-  the watch has no clock). `>profile?` prints it, `>profile=...` sets your own (never replaced;
-  a first line `TZ: <POSIX TZ>` sets the timezone), `>profile=` goes back to asking Muse.
-- **Who's answering:** Grok's or Muse's logo (22 px, `avatar/icons`, made by
-  `avatar/make_icons.py` and copied in by `build.sh`) shows just left of the battery ring while
-  that one answers, and Muse's while Muse is working on a question.
+  the watch has no clock). `>profile?` prints it, `>profile!` asks Muse for it again (the old one
+  stays in use until the new one comes), `>profile=...` sets your own (never replaced; first lines
+  `TZ: <POSIX TZ>` and `PLACE: City, Region, CC` set the timezone and place), and `>profile=`
+  forgets it, place included, until Muse is next asked.
+- **Who's answering:** Grok's, Gemini's or Muse's logo (20 px, `avatar/icons`, made by
+  `avatar/make_icons.py` and copied in by `build.sh`) in a soap bubble at 2 o'clock, where the
+  battery ring would be, while that one answers, and Muse's while Muse is working on a question
+  (a spinner runs round the bubble's rim while we wait). The bubble blows up in 0.2 s; when
+  nobody has been answering for 0.15 s it bursts: the logo goes, the bubble swells and fades,
+  and eight droplets fly out, over 0.3 s (`bubble_tick()` in `muse_ui.c`).
 - **Turns** end by xAI's voice detection. Every 20 ms the voice task plays a chunk of the reply
   and reads one from the mic; the mic streams to xAI except while the speaker plays and for
   300 ms after.
 - **On the wire** (following xAI's Voice Agent guide): audio goes both ways as binary WebSocket
   frames, no base64. The mic goes up as 8 kHz G.711 mu-law (11 KB/s): the watch's 2.4 GHz upload
   can fall to about 10 KB/s, under the 43 KB/s base64 16 kHz PCM needs. Replies come down as
-  16 kHz PCM, 6 dB quieter than sent before the speaker's boost. `reasoning.effort` is `none`
-  (Grok answers sooner; Muse does the thinking), and transcription gets an English hint and
-  key terms. Up to 4 s of mic is kept while connecting; later, more than 1 s behind is dropped.
+  16 kHz PCM, 2 dB quieter than sent (Gemini's, hotter, 6 dB) before the speaker's chain
+  (`muse_audio.c`, `CONFIG_MUSE_SPEAKER_BOOST_DB` boards): a 250 Hz low cut (the small speaker
+  can't play a voice's lows, which only eat its headroom), +12 dB, and a 3 ms look-ahead limiter
+  at −1 dBFS whose gain eases down before a peak and back over 100 ms. The one before it jumped
+  its gain to each peak a sample at a time, and loud words crackled. When the network falls
+  behind and a reply runs dry, its last chunk eases out over 4 ms and the next eases back in,
+  rather than clicking into silence and out again. `reasoning.effort` stays at xAI's default (with `none` Grok said its tool calls out
+  loud), and transcription gets an English hint and key terms. Up to 4 s of mic is kept while connecting; later, more than 1 s behind is dropped.
   The log shows `mic to xAI: 21.0s so far (0.0s dropped behind)` every 5 s and any send over
   250 ms.
 - **Talking over a reply** (barge-in): with no echo canceller on the board, `muse_echo.c` learns
-  how loud the speaker comes back in the mic (on the StopWatch, about as loud as it's sent) from
-  the first 500 ms of each reply, and 200 ms of mic 10 dB over that may be a voice. The reply is
+  how loud the speaker comes back in the mic from the first 500 ms of each reply, against what
+  actually left the speaker (after its boost and limiter, which cuts loud words up to 8 dB: the
+  level before it put the echo 15 dB off), and 200 ms of mic 10 dB over that may be a voice. A mic
+  chunk that clips (samples at full scale) while the speaker plays is the speaker overloading it,
+  learnt as echo and never a voice; a loud voice that doesn't clip still is. The reply is
   ducked 12 dB and the mic goes to xAI for 1.5 s: if xAI's voice detection hears speech, Grok
   stops (xAI cancels it itself); if not, it was a noise, the reply goes on and that audio is
   discarded. The log says `maybe a barge-in`, then `barge-in: xAI heard you` or
   `not a barge-in: xAI heard no speech`, and after each reply how loud the mic heard the speaker.
 - **Live facts:** the weather, news, sports and anything current go to the voice's own web
   search (xAI's `web_search`, Gemini's Google Search), located at your city from the profile's
-  `PLACE:` line: about a second, against Muse's ten or twenty.
+  `PLACE:` line: about a second, against Muse's five to fifteen.
 - **On screen:** only listening or speaking, never a waiting state or dots (the mic is open the
   whole time), and no lit ring (one that followed the voice redrew the whole screen at every
-  step and halved the frame rate). A yellow dot at 6 o'clock says it's listening. Captions are the last four lines said, left-aligned in the bottom half on their
-  scrim over the full-size character, kept with the audio as it plays. The voice's logo (Grok,
-  Gemini or Muse, 20 px, up and left of the battery ring) has a spinner round it while we
-  wait on it.
+  step and halved the frame rate). While it listens, a yellow arc on the rim at 6 o'clock follows
+  your voice: 14° in silence, growing to 90° at most as you talk (LVGL redraws only its moving
+  ends). It's on the face, so it slides off with it to settings; the bubble just goes.
+  Captions are the last three lines said (about 22 letters wide: that low, the round screen is
+  narrow), left-aligned a little above the arc on their scrim over the full-size character, kept with the
+  audio as it plays. The voice's logo is in its bubble at 2 o'clock.
 - **A click** while it speaks stops the reply and the conversation goes on; while it listens,
   a click ends the conversation. The top-left button (the speaker) says "SPEAKER ON/OFF"
   mid-conversation too: with it off you hear nothing.
 - **It ends** on a click; when you say goodbye or you're clearly done (the voice says goodbye and
-  calls `end_conversation`; it closes once that's heard); with nobody talking, nothing playing
-  and nothing waiting on the voice or Muse for 5 s after the press (4 s once there's been a
-  reply); or if the connection fails, whose reason stays up ("CAN'T REACH XAI", "XAI KEY
-  REFUSED", "LOST XAI").
+  calls `end_conversation`; it closes once that's heard, or 6 s after the call if no goodbye
+  comes); with nobody talking, nothing playing and nothing waiting on the voice or Muse for 5 s
+  after the press (7 s once there's been a reply: time to think); or if the connection fails,
+  whose reason stays up ("CAN'T REACH XAI", "LOST GEMINI"...). Someone talking by the mic (12 dB
+  over the room it learns) keeps it open too, the voice's word that it heard you coming late, but
+  for no more than 15 s past the voice's last sign. Muse's answer gets up to 20 s to start being
+  read, after which it's given up (it would hold the conversation open); talking over it, or a
+  click, drops it at once, and on xAI a click before a reply has started cancels it there too. The screen doesn't sleep during a conversation, and its 30 s sleep starts from the end.
 - **Connecting:** a first TLS handshake with xAI or Google takes 5-8 s on the watch, a resumed
   one a few hundred ms, so the watch does one in the background once Wi-Fi is up, on waking and
   on a talk press (`muse_live_warm()`; no session, nothing billed).
@@ -512,8 +543,9 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   starts meanwhile): Muse takes one request at a time, and a question asked while the profile
   was coming waited behind it.
 - **Two live voices:** xAI's Grok (the default) or Google's Gemini Live
-  (`gemini-3.1-flash-live-preview`, voice Leda), chosen over serial with
-  `>live_provider=gemini` or `>live_provider=xai` and kept in NVS. Gemini uses the stored Gemini
+  (`gemini-3.1-flash-live-preview`, voice Leda), chosen in Settings > Voice or over serial with
+  `>live_provider=gemini` or `>live_provider=xai` (from the next conversation; `>live_provider?`
+  says which) and kept in NVS. Gemini uses the stored Gemini
   key (`>gemini_key=...`). It costs about a sixth as much a minute (Google bills audio streamed,
   about $0.005/min in and $0.018/min out; xAI bills $0.08 for every minute a session is open).
   The differences:
@@ -525,6 +557,19 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   - It can't be interrupted by voice. With the speaker coming back 10 dB over a voice in this
     mic, it heard and believed its own words. A click stops its reply instead (with either
     voice: a click while it listens still ends the conversation).
+  - It followed the routing less well, so for it the instructions call it Muse itself and the
+    tool `assistant_request`; and the watch answers a call that's only small talk ("hi, how are
+    you?") itself (`small_talk()`: a greeting cue and nothing of substance left), sparing Muse.
+  - Its tool calls block, so it can't say "Let me check" first (it would come after the answer);
+    it says nothing, and the logo's spinner shows the wait. It sometimes ends its turn on Muse's
+    answer without saying it: then the watch nudges it once with a short text turn (or after 8 s
+    of nothing at all from it: a nudge while it's still working on a long answer would cut it off).
+- **Testing it end to end:** `uv run --no-project --with pyserial python scripts/e2e_live.py
+  [PORT] [--provider gemini|xai|both]`, with Charm idle, drives conversations over serial:
+  presses talk, types questions (`>live_ask=...`) or speaks them (`say` audio fed where the mic
+  goes, `>mic=<base64 PCM>`), and checks the log for small talk, the weather, Muse questions and
+  their read-out, a home question, a trick (bubbles, not sent to Muse), a click over a reply, a goodbye, silence, and Muse straight
+  after a reboot, plus no stuck loop, no errors and internal RAM never running out.
 - The protocol and instructions are the live-voice prototype's (`prototype/live-voice/orchestrator.js`,
   branch `live-voice-prototype`), which the simulator keeps matching. `tests/test_muse_echo.py`
   feeds the echo gate a reply's echo, a voice over it and the StopWatch's loud speaker.
@@ -552,10 +597,11 @@ voice notes to Muse (`converse()` in `muse_voice.c`):
   (`REPLY_STALL_US`), the watch ends the reply and the conversation and goes idle, logging
   `reply stalled`. While it speaks it logs `reply: Ns played` every 3 s, and xAI's worker logs
   `reply buffer full` if its 16 s buffer stays full for 2 s.
-- **It ends** when a turn hears nobody (5 s after the long press, 4 s after a reply: nothing is
+- **It ends** when a turn hears nobody (5 s after the long press, 7 s after a reply: nothing is
   sent), on a click of blue while it listens or speaks (a click stops the reply too), or when a
   note fails or is saved for later, whose caption stays up. A click while idle only says
-  "Hold to talk".
+  "Hold to talk": on boards with the pairing arrow (`.pair_arrow`), the arrow points at the
+  button with those words for 3 s; elsewhere, as a caption.
 - `LONG_PRESS_MS`, `FIRST_QUIET_MS` and `CONVERSATION_QUIET_MS` in `muse_voice.c`, and the
   `MUSE_VAD_*` levels in `muse_vad.h`, are the numbers to tune. `tests/test_muse_vad.py` feeds the
   detector speech, a loud fan, a louder room and a single click.
