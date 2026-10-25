@@ -478,6 +478,15 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   your Muse app." Grok never asks whether there's anything else afterwards: when you're done you
   say so, and the conversation ends on its own. Grok shows faces itself with `set_mood` when a
   reply has a clear feeling.
+- **Muse's slow answers** are handed off, as on Mobot: if Muse hasn't answered in 8 s, the voice
+  says Muse is on it and will let you know, and the conversation needn't wait (it ends on quiet or
+  a goodbye as usual; the question goes on in the background for up to 10 minutes, Muse's bubble
+  spinning on the idle face meanwhile, and Charm keeps its Wi-Fi dozing rather than resting). When
+  the answer comes: in a conversation that's on, the voice says it ("Muse got back to you. ..."); with
+  none, Charm wakes its screen, chimes, shows Muse's bubble and reads it out in the voice's text to
+  speech (xAI's, or Gemini's) with paged captions, and a click stops it. While a question is out,
+  another for Muse is told to wait a moment. `>live_handoff_ms=500` makes the hand-off quick for
+  tests (`scripts/e2e_live.py --handoff`).
 - **Tricks:** ask for something fun ("blow some bubbles", "juggle", "wave", "do a trick") and the
   voice does it itself with `do_trick` (never Muse): the character blows bubbles (6 s), juggles
   planets (8 s) or waves, once through, while the voice says a playful line. Unlike a face, a trick

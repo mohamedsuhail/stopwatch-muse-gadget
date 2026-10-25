@@ -8,7 +8,9 @@
 Every conversation is a paid live session (xAI bills each minute one is open), and Muse is
 really asked, so the default is the quick check: one conversation on the current voice, with a
 spoken question for Muse, its answer read out, and a spoken goodbye (about 40 s). --all runs
-every scenario on the voices chosen, and the cold start after a reboot (about 13 min for both).
+every scenario on the voices chosen, the hand-off (Muse made slow: the voice says Muse is on it and
+the answer is read out when it comes) and the cold start after a reboot (about 14 min for both);
+--handoff runs just the hand-off.
 
 It drives Charm the way a person would, except that questions are typed
 (">live_ask=...", which the live voice gets as if it had heard them) rather
@@ -29,6 +31,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("port", nargs="?", default="/dev/cu.usbmodem101")
 ap.add_argument("--provider", default=None, choices=["gemini", "xai", "both"])
 ap.add_argument("--all", action="store_true", help="every scenario, not the quick check")
+ap.add_argument("--handoff", action="store_true", help="just the hand-off: a slow Muse, the answer read out later")
 args = ap.parse_args()
 
 ser = serial.Serial(args.port, 115200, timeout=0.2)
@@ -309,14 +312,59 @@ def quick(provider):
     time.sleep(3)
 
 
+def handoff(provider):
+    """Muse made slow (handed off after 0.5 s): the voice says Muse is on it, the conversation ends on a
+    goodbye, and the answer is read out when it comes, in the conversation or after it."""
+    print(f"\n== {provider}: hand-off, Muse slow ==", flush=True)
+    send(f">live_provider={provider}\n".encode())
+    time.sleep(1)
+    send(b">live_handoff_ms=500\n")
+    time.sleep(0.5)
+    try:
+        m0, ok = start_conversation()
+        check(f"{provider}: conversation starts", bool(ok), ok and f"set up in {ok.group(1)} ms")
+        if not ok:
+            return
+        m = speak("What's on my calendar today?")
+        handed = wait_for(r"handed off", m, 30)
+        check(f"{provider}: the question is handed off", bool(handed))
+        # The voice's line comes after the hand-off (xAI says "Let me check." first): wait for it,
+        # and for it to be heard, before the goodbye, or the goodbye talks over it.
+        said = wait_for(r'(?:Grok|Gemini): "([^"]*)"', m + handed.end(), 30) if handed else None
+        check(f"{provider}: the voice says Muse is on it",
+              bool(said) and re.search(r"on it|working|let you know|get back|take a (little )?while", said.group(1), re.I),
+              said and f'"{said.group(1)[:70]}"')
+        if said:
+            wait_for(r"reply played", m + handed.end(), 20)
+        m2 = speak("Thanks, that's all. Goodbye!")
+        over = conversation_over(m2, 40)
+        check(f"{provider}: the conversation ends meanwhile", bool(over), over and f"ended ({over.group(1)})")
+        back = wait_for(r"Muse got back", m, 120)
+        check(f"{provider}: Muse gets back", bool(back), back and back.group(0))
+        if back:
+            after = back.end()
+            played = None
+            end = time.time() + 60
+            while time.time() < end and not played:
+                played = re.search(r"announcement played|reply played", text_from(m)[after:])
+                time.sleep(0.3)
+            check(f"{provider}: the answer is read out", bool(played), played and played.group(0))
+    finally:
+        send(b">live_handoff_ms=0\n")   # back to 8 s
+        time.sleep(3)
+
+
 m0 = mark()
 send(b">live_provider?\n")
 found = wait_for(r"@live_provider (\w+)", m0, 5)
 before = found.group(1) if found else "xai"
-if args.all:
+if args.handoff:
+    handoff(before if args.provider in ("both", None) else args.provider)
+elif args.all:
     providers = ["gemini", "xai"] if args.provider in ("both", None) else [args.provider]
     for p in providers:
         run(p)
+    handoff(providers[0])
     cold_start(providers[0])
 else:
     quick(before if args.provider in ("both", None) else args.provider)

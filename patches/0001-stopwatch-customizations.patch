@@ -3873,10 +3873,10 @@ index 5a60abf..c59bc34 100644
          if (!strcmp(name, modes[m])) {
 diff --git a/esp32/components/muse/muse_live.c b/esp32/components/muse/muse_live.c
 new file mode 100644
-index 0000000..dd7c8b4
+index 0000000..a7010e2
 --- /dev/null
 +++ b/esp32/components/muse/muse_live.c
-@@ -0,0 +1,2545 @@
+@@ -0,0 +1,2680 @@
 +#include "muse_live.h"
 +
 +#include <math.h>
@@ -3931,7 +3931,15 @@ index 0000000..dd7c8b4
 +#define STACK (12 * 1024)
 +#define WIFI_WAIT_MS 10000
 +#define SETUP_US (10 * 1000000LL)             /* session.updated within this, or it failed */
-+#define MUSE_WAIT_US (90 * 1000000LL)         /* Muse's answer within this, or Grok says it couldn't */
++#define MUSE_WAIT_US (90 * 1000000LL)         /* Muse's answer within this, or Grok says it couldn't... */
++#define HANDOFF_US (8 * 1000000LL)            /* ...but not back by then, it's handed off: the voice says Muse is on it,
++                                               * the conversation needn't wait, and the answer comes when it comes */
++#define TASK_WAIT_US (10 * 60 * 1000000LL)    /* a handed-off question is given up after this */
++#define ANNOUNCE_LEAD "Muse got back to you. "
++static int64_t s_handoff_us = HANDOFF_US;    /* ">live_handoff_ms=" shortens it for tests */
++static const char HANDOFF_NOTE[] =
++    "Muse is still working on it and will send the answer to Charm when it's done. Tell the user, in one short "
++    "sentence, that Muse is on it and will let them know. Don't ask if there's anything else.";
 +#define MUSE_MSGS 8                           /* messages in one Muse answer */
 +#define MUSE_MSG_MAX 2048
 +#define MUSE_QUEUE 32
@@ -3999,7 +4007,8 @@ index 0000000..dd7c8b4
 +    "anything from earlier in this conversation needed to understand it.\n"
 +    "When you call ask_muse, say only \"Let me check.\" first, and nothing after it: the answer is "
 +    "read to the user word for word. Never say the question you pass to ask_muse out loud. If the result is "
-+    "an error, say briefly that you couldn't check just now.\n"
++    "an error, say briefly that you couldn't check just now. If the result says Muse is still working, tell them "
++    "in one short sentence that Muse is on it and will let them know, and nothing more.\n"
 +    "Your face shows on the user's screen. Call set_mood, as you start speaking, whenever your reply has a clear "
 +    "feeling: joy when you're glad, something's funny or there's good news; thinking when you're working "
 +    "something out; sad for bad news or sympathy; goodnight when the user is leaving or going to sleep. Most "
@@ -4168,6 +4177,7 @@ index 0000000..dd7c8b4
 +static struct {
 +    bool active;
 +    bool profile;                    /* the profile question, not Grok's */
++    bool handed;                     /* handed off: the voice has said Muse is on it; the answer comes when it comes */
 +    char call_id[ID_MAX];
 +    int64_t t0;
 +    char *texts;                     /* MUSE_MSGS x MUSE_MSG_MAX, PSRAM */
@@ -4178,9 +4188,12 @@ index 0000000..dd7c8b4
 +/* Muse's answer (or error), waiting for a quiet moment to be said. */
 +static struct {
 +    bool pending, error;
++    bool handed;                     /* a handed-off question's: announced, not given back for the tool call */
 +    char call_id[ID_MAX];
 +    char *text;                      /* ANSWER_MAX, PSRAM */
 +} s_deliver;
++static char *s_announce;             /* ANSWER_MAX, PSRAM: a handed-off answer for the voice task to read out */
++static atomic_bool s_announce_ready;
 +
 +EXT_RAM_BSS_ATTR static char s_out[OUT_TEXT_MAX];   /* Grok's words so far, for the caption */
 +static size_t s_out_len;
@@ -4356,6 +4369,13 @@ index 0000000..dd7c8b4
 +            }
 +        }
 +        return true;   /* quietly: 50 lines a second */
++    }
++    if (strncmp(line, "live_handoff_ms=", 16) == 0) {
++        int ms = atoi(line + 16);
++        s_handoff_us = ms > 0 ? ms * 1000LL : HANDOFF_US;
++        printf("@live_handoff_ms %lld\n", (long long)(s_handoff_us / 1000));
++        fflush(stdout);
++        return true;
 +    }
 +    if (strncmp(line, "live_ask=", 9) == 0) {
 +        /* For testing without talking: as if you'd said it, in the open conversation. */
@@ -5062,6 +5082,7 @@ index 0000000..dd7c8b4
 +    s_ask.nmsgs = 0;
 +    s_ask.active = true;
 +    s_ask.profile = false;
++    s_ask.handed = false;
 +    s_ask.t0 = now_us();
 +    strlcpy(s_ask.call_id, call_id, sizeof(s_ask.call_id));
 +    ESP_LOGI(TAG, "asking Muse: \"%.200s\"", question);
@@ -5079,6 +5100,7 @@ index 0000000..dd7c8b4
 +    memset(s_ask.lens, 0, sizeof(s_ask.lens));
 +    s_ask.nmsgs = 0;
 +    s_ask.active = s_ask.profile = true;
++    s_ask.handed = false;
 +    s_ask.t0 = now_us();
 +    s_ask.call_id[0] = '\0';
 +    ESP_LOGI(TAG, "asking Muse for the profile");
@@ -5109,6 +5131,7 @@ index 0000000..dd7c8b4
 +    }
 +    s_deliver.pending = true;
 +    s_deliver.error = error != NULL;
++    s_deliver.handed = s_ask.handed;
 +    strlcpy(s_deliver.call_id, s_ask.call_id, sizeof(s_deliver.call_id));
 +    if (error) {
 +        strlcpy(s_deliver.text, error, ANSWER_MAX);
@@ -5157,10 +5180,89 @@ index 0000000..dd7c8b4
 +        }
 +        free(it.text);
 +    }
-+    if (s_ask.active && now_us() - s_ask.t0 > MUSE_WAIT_US) {
++    if (s_ask.active && !s_ask.profile && !s_ask.handed && now_us() - s_ask.t0 > s_handoff_us) {
++        /* Muse is taking a while: the voice says it's on it, and the question goes on in the
++         * background, the conversation free to end; the answer is read out when it comes. */
++        s_ask.handed = true;
++        ESP_LOGI(TAG, "Muse is taking a while: handed off, the answer comes later");
++        if (atomic_load(&s_want) && atomic_load(&s_state) == MUSE_LIVE_READY) {
++            if (atomic_load(&s_prov) == LIVE_GEMINI) {
++                gemini_output(s_ask.call_id, "result", "Muse is still working on it and will send the answer to Charm "
++                              "when it's done.", "Tell the user in one short sentence that Muse is on it and will let "
++                              "them know. Don't ask if there's anything else.");
++            } else {
++                output(s_ask.call_id, "result", HANDOFF_NOTE);
++                create_response();
++            }
++        }
++    }
++    if (s_ask.active && now_us() - s_ask.t0 > (s_ask.handed ? TASK_WAIT_US : MUSE_WAIT_US)) {
 +        muse_hatch_text_cancel();
 +        ask_done("it took too long");
 +    }
++}
++
++/* A handed-off answer (or its failure), as words to say: faces taken, tags gone, briefed, led in. */
++static void announcement_words(void)
++{
++    if (s_deliver.error) {
++        strlcpy(s_deliver.text, "Muse couldn't finish what you asked earlier.", ANSWER_MAX);
++        return;
++    }
++    muse_hatch_take_faces(s_deliver.text, strlen(s_deliver.text));
++    size_t n = muse_hatch_strip_tags(s_deliver.text, s_deliver.text, ANSWER_MAX, NULL);
++    n = brief(s_deliver.text, n);
++    size_t lead = sizeof(ANNOUNCE_LEAD) - 1;
++    if (n + lead + 1 < ANSWER_MAX) {
++        memmove(s_deliver.text + lead, s_deliver.text, n + 1);
++        memcpy(s_deliver.text, ANNOUNCE_LEAD, lead);
++    }
++}
++
++/* Muse got back with a handed-off answer while a conversation is on: said in it. */
++static void announce_live(void)
++{
++    announcement_words();
++    muse_hatch_speakable(s_deliver.text, strlen(s_deliver.text), s_said);
++    ESP_LOGI(TAG, "Muse got back: said in the conversation");
++    s_said_us = now_us();
++    s_nudged = s_say_unsaid = false;
++    if (atomic_load(&s_prov) == LIVE_GEMINI) {
++        static const char ASK[] = "Muse has the answer to the question from earlier. Say this to the user now, word for "
++                                  "word, adding nothing before or after it: ";
++        size_t n = sizeof(ASK) + strlen(s_said);
++        char *text = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (!text) {
++            return;
++        }
++        snprintf(text, n, "%s%s", ASK, s_said);
++        s_say_next = true;   /* its answer is Muse's words: Muse's logo and caption */
++        gemini_typed(text);
++        free(text);
++    } else {
++        say(s_said);
++    }
++}
++
++/* ...and while none is: the voice task wakes Charm and reads it out (muse_live_take_announcement). */
++static void idle_deliver(void)
++{
++    s_deliver.pending = false;
++    if (!s_announce) {
++        s_announce = heap_caps_malloc(ANSWER_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (!s_announce) {
++            return;
++        }
++    }
++    if (s_deliver.error) {
++        ESP_LOGW(TAG, "Muse's background task ended without an answer: %s", s_deliver.text);
++    }
++    announcement_words();
++    muse_hatch_speakable(s_deliver.text, strlen(s_deliver.text), s_announce);
++    atomic_store(&s_announce_ready, true);
++    ESP_LOGI(TAG, "Muse got back while nobody was talking: waking Charm to read it out");
++    muse_state_set_asleep(false);   /* the screen, and the voice task out of its rest */
++    muse_state_poke();
 +}
 +
 +/* Hands Muse's answer to Grok when nobody is talking and nothing is playing. */
@@ -5181,6 +5283,10 @@ index 0000000..dd7c8b4
 +        atomic_store(&s_you, false);
 +    }
 +    s_deliver.pending = false;
++    if (s_deliver.handed) {
++        announce_live();   /* the tool call was answered at the hand-off: this is news */
++        return;
++    }
 +    if (s_deliver.error) {
 +        char why[300];
 +        snprintf(why, sizeof(why), "Muse couldn't answer: %s", s_deliver.text);
@@ -5838,15 +5944,20 @@ index 0000000..dd7c8b4
 +    free(s_pend);
 +    s_pend = NULL;
 +    s_pend_len = s_pend_off = 0;
-+    if (s_ask.active) {
++    /* A question handed off goes on: its answer is read out when it comes. Any other dies here. */
++    if (s_ask.active && !s_ask.handed) {
 +        muse_hatch_text_cancel();
 +        s_ask.active = false;
 +    }
-+    atomic_store(&s_asking, false);
-+    s_deliver.pending = false;
-+    muse_item_t it;
-+    while (xQueueReceive(s_muse_q, &it, 0) == pdTRUE) {
-+        free(it.text);
++    if (!s_ask.active) {
++        atomic_store(&s_asking, false);
++        muse_item_t it;
++        while (xQueueReceive(s_muse_q, &it, 0) == pdTRUE) {
++            free(it.text);
++        }
++    }
++    if (!s_deliver.handed) {
++        s_deliver.pending = false;
 +    }
 +    atomic_store(&s_you, false);
 +    atomic_store(&s_who, MUSE_RESPONDER_NONE);
@@ -6177,8 +6288,9 @@ index 0000000..dd7c8b4
 +    atomic_store(&s_answering, s_awaiting || r.active || s_pend);
 +    atomic_store(&s_mic_waiting, s_mic && xStreamBufferBytesAvailable(s_mic) > MIC_SEND);
 +    /* Muse's: asked, answered and waiting, or being read out. */
-+    atomic_store(&s_museing, (s_ask.active && !s_ask.profile) || s_deliver.pending || s_say_next ||
-+                                 (r.active && r.from_muse));
++    atomic_store(&s_museing, (s_ask.active && !s_ask.profile && !s_ask.handed) ||
++                                 (s_deliver.pending && !s_deliver.handed) || s_say_next || (r.active && r.from_muse));
++    muse_state_set_muse_busy(s_ask.active && !s_ask.profile && s_ask.handed);
 +}
 +
 +static void task(void *arg)
@@ -6205,6 +6317,9 @@ index 0000000..dd7c8b4
 +            }
 +            if (s_ask.active) {
 +                muse_frames();
++            }
++            if (s_deliver.pending) {
++                idle_deliver();   /* a handed-off answer, with nobody to say it: read out */
 +            }
 +            publish();
 +            ulTaskNotifyTake(pdTRUE, s_ask.active ? pdMS_TO_TICKS(100) : s_profile_due_us ? pdMS_TO_TICKS(1000)
@@ -6374,6 +6489,26 @@ index 0000000..dd7c8b4
 +    }
 +}
 +
++bool muse_live_task_out(void)
++{
++    return muse_state_muse_busy();
++}
++
++bool muse_live_take_announcement(char *out, size_t cap)
++{
++    if (!atomic_exchange(&s_announce_ready, false) || !s_announce) {
++        return false;
++    }
++    strlcpy(out, s_announce, cap);
++    return true;
++}
++
++size_t muse_live_caption_page(const char *text, size_t len, size_t at, int cols, int lines, int *page_no, char *out,
++                              size_t cap)
++{
++    return caption_page(text, len, at, cols, lines, page_no, out, cap);
++}
++
 +bool muse_live_injecting(void)
 +{
 +    int64_t at = atomic_load(&s_inject_us);
@@ -6424,10 +6559,10 @@ index 0000000..dd7c8b4
 +}
 diff --git a/esp32/components/muse/muse_live.h b/esp32/components/muse/muse_live.h
 new file mode 100644
-index 0000000..abc2128
+index 0000000..a107342
 --- /dev/null
 +++ b/esp32/components/muse/muse_live.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,137 @@
 +#pragma once
 +
 +#include <stdbool.h>
@@ -6483,6 +6618,19 @@ index 0000000..abc2128
 + * open one keeps its own. False if it couldn't be stored. */
 +bool muse_live_set_voice(muse_responder_t voice);
 +
++/* A question handed off to Muse (it took more than HANDOFF_US; the voice said Muse is on it)
++ * is still out: the answer comes later, read out when it does. */
++bool muse_live_task_out(void);
++
++/* Muse got back with a handed-off answer while no conversation was on: the words for the
++ * voice task to read out (announce()), once. */
++bool muse_live_take_announcement(char *out, size_t cap);
++
++/* The page of a reply its speech has reached, as the live captions page it (muse_voice.c's
++ * announcements). Returns where the page ends. */
++size_t muse_live_caption_page(const char *text, size_t len, size_t at, int cols, int lines, int *page_no, char *out,
++                              size_t cap);
++
 +/* The provider's key is stored (muse_live_no_key() says which, if not). */
 +bool muse_live_configured(void);
 +
@@ -6496,6 +6644,8 @@ index 0000000..abc2128
 + * for it again, quietly, and Grok gets it, with the local date and time, at
 + * the start of each conversation.
 + *
++ * Also ">live_handoff_ms=N" (testing): Muse's question is handed off after N ms instead
++ * of 8 s (0: back to 8 s), so the hand-off can be tried with an ordinary question.
 + * Also ">live_provider=xai" or ">live_provider=gemini": whose live voice
 + * (Gemini Live, gemini-3.1-flash-live-preview, costs about a sixth as much a
 + * minute; xAI reads Muse's answers word for word, Gemini says them).
@@ -7068,7 +7218,7 @@ index 6a372ac..63000c2 100644
          tick_battery();
      }
 diff --git a/esp32/components/muse/muse_state.c b/esp32/components/muse/muse_state.c
-index 27377e2..b3897e2 100644
+index 27377e2..37a2bcc 100644
 --- a/esp32/components/muse/muse_state.c
 +++ b/esp32/components/muse/muse_state.c
 @@ -38,6 +38,9 @@ static volatile float s_level;
@@ -7098,7 +7248,7 @@ index 27377e2..b3897e2 100644
      s_mode = mode;
  }
  
-@@ -231,6 +243,76 @@ void muse_state_nudge(void)
+@@ -231,6 +243,86 @@ void muse_state_nudge(void)
      xEventGroupSetBits(s_wake, NUDGE_BIT);
  }
  
@@ -7119,7 +7269,17 @@ index 27377e2..b3897e2 100644
 +    return s_responder;
 +}
 +
-+static volatile bool s_waiting_on;
++static volatile bool s_waiting_on, s_muse_busy;
++
++void muse_state_set_muse_busy(bool busy)
++{
++    s_muse_busy = busy;
++}
++
++bool muse_state_muse_busy(void)
++{
++    return s_muse_busy;
++}
 +
 +void muse_state_set_waiting(bool waiting)
 +{
@@ -7176,7 +7336,7 @@ index 27377e2..b3897e2 100644
  {
      s_happy_until_us = esp_timer_get_time() + (int64_t)(HAPPY_SECS * 1e6f);
 diff --git a/esp32/components/muse/muse_state.h b/esp32/components/muse/muse_state.h
-index ecea3fe..12af77d 100644
+index ecea3fe..e0ca7a3 100644
 --- a/esp32/components/muse/muse_state.h
 +++ b/esp32/components/muse/muse_state.h
 @@ -58,6 +58,9 @@ float muse_state_progress(void);
@@ -7189,7 +7349,7 @@ index ecea3fe..12af77d 100644
  
  void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  /* Copies the caption if it changed since *version; returns true on change. */
-@@ -92,6 +95,53 @@ bool muse_state_asleep(void);
+@@ -92,6 +95,57 @@ bool muse_state_asleep(void);
  void muse_state_wait_awake(uint32_t timeout_ms);
  void muse_state_nudge(void);
  
@@ -7243,8 +7403,12 @@ index ecea3fe..12af77d 100644
 +/* ...and whether we're waiting on them (a spinner round the logo) rather than hearing them. */
 +void muse_state_set_waiting(bool waiting);
 +bool muse_state_waiting(void);
++/* Muse is working on a question handed off from a conversation (muse_live.c): the idle face
++ * shows Muse's bubble spinning until the answer comes. */
++void muse_state_set_muse_busy(bool busy);
++bool muse_state_muse_busy(void);
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index d0d4e2f..a8d9bfe 100644
+index d0d4e2f..54a7b6a 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -20,6 +20,7 @@
@@ -8389,7 +8553,7 @@ index d0d4e2f..a8d9bfe 100644
          } else {
              lv_obj_set_style_bg_color(s_bar, lv_color_hex(accent), 0);
          }
-@@ -1465,13 +2241,75 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1465,13 +2241,80 @@ static void update_status(muse_mode_t mode, float now)
          s_shown_lit = -1;
      }
  
@@ -8447,6 +8611,11 @@ index d0d4e2f..a8d9bfe 100644
 +#if MUSE_HAS_LOGOS
 +    /* Grok's or Muse's logo while one of them answers; hidden on settings, with the ring. */
 +    muse_responder_t who = s_on_settings ? MUSE_RESPONDER_NONE : muse_state_responder();
++    /* Muse working on a question handed off from a conversation: its bubble spins on the idle face. */
++    bool task_out = who == MUSE_RESPONDER_NONE && !s_on_settings && muse_state_muse_busy();
++    if (task_out) {
++        who = MUSE_RESPONDER_MUSE;
++    }
 +    if (s_bubble) {
 +        bubble_tick(who, now);
 +    } else if (s_logo && who != s_logo_shown) {
@@ -8456,7 +8625,7 @@ index d0d4e2f..a8d9bfe 100644
 +        }
 +        lv_obj_set_flag(s_logo, LV_OBJ_FLAG_HIDDEN, who == MUSE_RESPONDER_NONE);
 +    }
-+    bool spin = s_logo_spin && who != MUSE_RESPONDER_NONE && muse_state_waiting();
++    bool spin = s_logo_spin && who != MUSE_RESPONDER_NONE && (muse_state_waiting() || task_out);
 +    if (s_logo_spin && spin == lv_obj_has_flag(s_logo_spin, LV_OBJ_FLAG_HIDDEN)) {
 +        lv_obj_set_flag(s_logo_spin, LV_OBJ_FLAG_HIDDEN, !spin);
 +    }
@@ -8468,7 +8637,7 @@ index d0d4e2f..a8d9bfe 100644
      if (s_ring && mode == MUSE_MODE_THINKING) {
          /* Move the indicator rather than rotate the arc: a rotation redraws
           * the whole ring, and with it the whole screen. */
-@@ -1498,7 +2336,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1498,7 +2341,7 @@ static void update_status(muse_mode_t mode, float now)
      }
  
      /* The mic's meter; a reply's page has the room while answering. */
@@ -8477,7 +8646,7 @@ index d0d4e2f..a8d9bfe 100644
      set_meter_visible(meter);
      if (meter && !s_small) {
          int lit = (int)lroundf(s_level * METER_SEGS);
-@@ -1520,13 +2358,20 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1520,13 +2363,20 @@ static void update_status(muse_mode_t mode, float now)
      int answer = -1;
      if (s_reply_lbl) {
          /* The speaker picks the layout, even mid-reply: the voice task pages to fit. */
@@ -8501,7 +8670,7 @@ index d0d4e2f..a8d9bfe 100644
          }
      }
      if (answer != s_answer) {
-@@ -1540,12 +2385,40 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1540,12 +2390,40 @@ static void update_status(muse_mode_t mode, float now)
              lv_obj_set_style_text_font(s_caption_lbl, muse_text_has_cjk(caption) ? caption_font() : &lv_font_unscii_8, 0);
          }
  #endif
@@ -8544,7 +8713,7 @@ index d0d4e2f..a8d9bfe 100644
      update_power(now);
  }
  
-@@ -1640,19 +2513,35 @@ static void frame_tick(lv_timer_t *timer)
+@@ -1640,19 +2518,35 @@ static void frame_tick(lv_timer_t *timer)
          return;
      }
  
@@ -8583,7 +8752,7 @@ index d0d4e2f..a8d9bfe 100644
  
      update_status(mode, now);
  }
-@@ -1705,10 +2594,14 @@ esp_err_t muse_ui_start(void)
+@@ -1705,10 +2599,14 @@ esp_err_t muse_ui_start(void)
      }
      build_overlays();
      lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
@@ -8726,7 +8895,7 @@ index 0000000..b48fd58
 +/* One chunk's level; returns the state after it. */
 +muse_vad_state_t muse_vad_feed(muse_vad_t *v, float db);
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 38c7c9d..9576365 100644
+index 38c7c9d..939efdf 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
 @@ -31,6 +31,13 @@
@@ -9059,7 +9228,7 @@ index 38c7c9d..9576365 100644
              fed = feed_rest(s_rec, s_rec_n, &s_sent, false) == FED;
              if (!fed) {
                  muse_hatch_turn_cancel();
-@@ -786,6 +910,353 @@ static bool can_record(void)
+@@ -786,6 +910,460 @@ static bool can_record(void)
      return true;
  }
  
@@ -9410,10 +9579,129 @@ index 38c7c9d..9576365 100644
 +}
 +#endif
 +
++#if CONFIG_MUSE_HATCH
++/* Muse got back with the answer to a question handed off earlier, with no conversation on
++ * (muse_live.c): the screen is awake by now; a chime, Muse's bubble, and the answer read out in
++ * the voice's text to speech (xAI's, or Gemini's) with its captions, a page at a time. A click
++ * stops it. */
++#define ANNOUNCE_MAX 1024
++#define ANNOUNCE_CPS 14                /* about how fast it's said, for the captions (muse_live.c's CAP_MUSE_CPS) */
++#define ANNOUNCE_START_US 15000000     /* no audio by then: shown, not said */
++#define ANNOUNCE_STALL_US 10000000
++#define ANNOUNCE_HOLD_US 2500000       /* its last words stay this long after */
++static void announce(const char *text)
++{
++    muse_wifi_power(MUSE_WIFI_FULL);
++    if (!s_speaker) {
++        s_speaker = xStreamBufferCreateWithCaps(LIVE_SPEAKER_BYTES, 1, MUSE_BIG_CAPS);
++        if (!s_speaker) {
++            return;
++        }
++    }
++    drain_speaker();
++    while (got_event(MUSE_PTT_DOWN) || got_event(MUSE_PTT_UP)) {
++    }   /* nothing stale stops it */
++    muse_state_poke();
++    muse_state_set_responder(MUSE_RESPONDER_MUSE);
++    muse_state_set_mode(MUSE_MODE_SPEAKING);
++    muse_audio_chirp(1);
++    size_t len = strlen(text), played = 0;
++    EXT_RAM_BSS_ATTR static char page[MUSE_CAPTION_MAX];
++    int shown = -1;
++    bool voiced = muse_gemini_tts_begin(s_speaker);   /* xAI's voice when its key is stored, else Gemini's */
++    if (voiced) {
++        muse_gemini_tts_say(text, len);
++        muse_gemini_tts_end();
++    } else {
++        ESP_LOGW(TAG, "no voice to read Muse's answer: shown only");
++    }
++    static int16_t out[MUSE_AUDIO_CHUNK];
++    int64_t t0 = esp_timer_get_time(), last_audio = t0, poked = t0;
++    bool started = false, stopped = false;
++    muse_audio_take_limiting();
++    for (;;) {
++        int64_t now = esp_timer_get_time();
++        if (got_event(MUSE_PTT_DOWN)) {
++            stopped = true;
++            break;
++        }
++        if (now - poked > 1000000) {
++            poked = now;
++            muse_state_poke();
++        }
++        size_t n = voiced ? xStreamBufferReceive(s_speaker, out, sizeof(out), pdMS_TO_TICKS(20)) : 0;
++        if (n) {
++            started = true;
++            last_audio = now;
++            memset((uint8_t *)out + n, 0, sizeof(out) - n);
++            muse_state_set_level(muse_audio_level(out, MUSE_AUDIO_CHUNK));
++            muse_audio_write(out, MUSE_AUDIO_CHUNK);
++            played += n / 2;
++        } else if (!voiced) {
++            /* Shown only: time to read it, as muse_live.c paces a caption. */
++            played += MUSE_AUDIO_CHUNK;
++            vTaskDelay(pdMS_TO_TICKS(20));
++        }
++        /* The caption: the page the words have reached. */
++        size_t at = played * ANNOUNCE_CPS / MUSE_AUDIO_RATE;
++        int cols, lines, p;
++        muse_state_page(false, &cols, &lines);
++        muse_live_caption_page(text, len, at < len ? at : len, cols > 4 ? cols - 1 : 20, lines > 0 ? lines : 3, &p,
++                               page, sizeof(page));
++        if (p != shown && page[0]) {
++            shown = p;
++            muse_state_set_caption("%s", page);
++        }
++        if (voiced) {
++            muse_gemini_tts_state_t st = muse_gemini_tts_state();
++            if ((st == MUSE_GEMINI_TTS_DONE || st == MUSE_GEMINI_TTS_FAILED) && xStreamBufferIsEmpty(s_speaker)) {
++                break;
++            }
++            if ((!started && now - t0 > ANNOUNCE_START_US) || (started && now - last_audio > ANNOUNCE_STALL_US)) {
++                ESP_LOGW(TAG, "Muse's answer: the voice %s", started ? "stalled" : "never started");
++                muse_gemini_tts_cancel();
++                break;
++            }
++        } else if (at >= len + 20) {
++            break;
++        }
++    }
++    if (stopped) {
++        muse_gemini_tts_cancel();
++        drain_speaker();
++        got_event(MUSE_PTT_UP);
++    }
++    ESP_LOGI(TAG, "announcement played (%.1fs of audio%s)", played / (double)MUSE_AUDIO_RATE, stopped ? ", stopped by a click" : "");
++    muse_state_set_level(0);
++    for (int64_t hold = esp_timer_get_time(); !stopped && esp_timer_get_time() - hold < ANNOUNCE_HOLD_US;) {
++        if (got_event(MUSE_PTT_DOWN)) {
++            got_event(MUSE_PTT_UP);
++            break;
++        }
++        vTaskDelay(pdMS_TO_TICKS(20));
++    }
++    muse_state_set_responder(MUSE_RESPONDER_NONE);
++    go_idle("");
++    pre_reset();
++}
++#endif
++
  static void voice_task(void *arg)
  {
      bool pending_down = false;
-@@ -806,7 +1277,6 @@ static void voice_task(void *arg)
+@@ -797,6 +1375,11 @@ static void voice_task(void *arg)
+             bool asleep = muse_state_asleep();
+             bool battery = muse_state_on_battery();
+             bool rest = asleep && battery && !s_chirp && !s_mp3test && !s_loopback;
++#if CONFIG_MUSE_HATCH
++            if (muse_board->live_talk && muse_live_task_out()) {
++                rest = false;   /* Muse's answer is coming: stay reachable (Wi-Fi dozing, not resting) */
++            }
++#endif
+ #if HOLD_NOTES
+             /* A press goes first: send_held() leaves it queued and returns
+              * without backing off, so retrying before it's read would spin. */
+@@ -806,7 +1389,6 @@ static void voice_task(void *arg)
                  pending_down = send_held(asleep);
                  pre_reset();
                  if (!pending_down && !asleep && muse_state_mode(NULL) != MUSE_MODE_IDLE) {
@@ -9421,7 +9709,7 @@ index 38c7c9d..9576365 100644
                      go_idle("");
                  }
                  continue;
-@@ -843,6 +1313,15 @@ static void voice_task(void *arg)
+@@ -843,6 +1425,24 @@ static void voice_task(void *arg)
                  muse_audio_loopback_test(muse_settings_volume());
                  pre_reset();
              }
@@ -9434,10 +9722,19 @@ index 38c7c9d..9576365 100644
 +                muse_live_warm();
 +            }
 +#endif
++#if CONFIG_MUSE_HATCH
++            if (muse_board->live_talk) {
++                EXT_RAM_BSS_ATTR static char answer[ANNOUNCE_MAX];
++                if (muse_live_take_announcement(answer, sizeof(answer))) {
++                    announce(answer);   /* Muse got back, with nobody talking */
++                    continue;
++                }
++            }
++#endif
              /* The 20 ms read paces this loop. */
              idle_capture();
              if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
-@@ -854,6 +1333,37 @@ static void voice_task(void *arg)
+@@ -854,6 +1454,37 @@ static void voice_task(void *arg)
              }
              wake = ev.wake;
          }
@@ -9475,7 +9772,7 @@ index 38c7c9d..9576365 100644
          if (wake && !held_on_waking()) {
              continue;   /* a tap: it only woke Muse */
          }
-@@ -864,7 +1374,8 @@ static void voice_task(void *arg)
+@@ -864,7 +1495,8 @@ static void voice_task(void *arg)
          }
          size_t held;
          char why[96];
@@ -9485,7 +9782,7 @@ index 38c7c9d..9576365 100644
          pending_down = false;
          if (held < MIN_HELD_FRAMES && !wake) {
              muse_hatch_turn_cancel();
-@@ -880,8 +1391,9 @@ static void voice_task(void *arg)
+@@ -880,8 +1512,9 @@ static void voice_task(void *arg)
          }
          pending_down = finish_note();
          pre_reset();
