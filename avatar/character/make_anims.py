@@ -5,7 +5,9 @@
 
 CLIPS_DIR (default avatar/character/clips) holds the .mp4 clips named in CLIPS
 below (16:9, character centred on black; ANIMATION_PROMPTS.md says how they're
-made). Each is cropped to its centre square, scaled to SIZE px at its own frame
+made), all from the one Mobot Anim set, so every clip starts and ends on the same
+neutral pose and any clip cuts into any other without a jump (the old wake and
+error clips, drawn apart, didn't). Each is cropped to its centre square, scaled to SIZE px at its own frame
 rate, its near-black background made true black, sharpened a little, and scaled
 so its first (neutral) frame's figure matches the reference clip's. One-shots
 lose the still frames at their ends. OUT (default avatar/character/anims.pack)
@@ -38,13 +40,14 @@ REFERENCE = "listening.mp4"         # the neutral pose every clip starts and end
 # the still frames at both ends), "loop-best" (old clips: the best-matching start
 # and end), or a number of seconds to end at.
 CLIPS = [
-    ("wake",          "wake.mp4",          12, True,  None),
+    ("wake",          "stretch_yawn.mp4",  12, True,  "still"),      # waking: a stretch and a yawn, held on its neutral end
+
     ("idle",          "listening.mp4",     10, False, "loop"),        # calm: the listening loop
     ("listening",     "listening.mp4",     10, False, "loop"),
     ("thinking",      "thinking.mp4",      15, False, "loop"),
     ("speaking",      "speaking.mp4",      24, False, "loop"),
     ("happy",         "happy.mp4",         15, False, "still"),
-    ("error",         "error.mp4",         10, False, "loop-best"),
+    ("error",         "sad.mp4",           15, False, "still"),      # the head shake, looped
     ("goodbye",       "goodbye.mp4",       12, True,  3.8),           # holds asleep, not the neutral end
     ("sad",           "sad.mp4",           15, False, "still"),
     ("nod",           "nod.mp4",           12, True,  "still"),
@@ -133,10 +136,9 @@ for name, file, fps, once, how in CLIPS:
         print(f"{name:14s} shares {file}'s frames")
         continue
     ims = frames(file, fps)
-    if name != "wake":   # wake starts curled up: nothing neutral to match
-        ims, f = match_size(ims, ref)
-        if f != 1.0:
-            print(f"{name:14s} scaled {f:.3f} to {REFERENCE}'s size")
+    ims, f = match_size(ims, ref)   # every clip is from the one set now, starting on the neutral pose
+    if f != 1.0:
+        print(f"{name:14s} scaled {f:.3f} to {REFERENCE}'s size")
     s, e = trim(ims, how, fps)
     shared[key] = (len(jpegs), e - s)
     table.append((len(jpegs), e - s, 1 if once else 0, fps))

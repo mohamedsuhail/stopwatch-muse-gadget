@@ -435,6 +435,12 @@ static int reaction_clip(const muse_pose_t *p)
 }
 
 static bool s_trick_again;   /* a trick began afresh: its clip restarts even if it's showing already */
+static float s_switched_at = -1;   /* when one clip last changed into another: the UI's poof */
+
+float muse_pixel_switched_at(void)
+{
+    return s_switched_at;
+}
 
 static int clip_for(const muse_pose_t *p)
 {
@@ -557,6 +563,9 @@ void muse_pixel_render(const muse_pose_t *p)
     int clip = clip_for(p);
     if (clip != s_clip || s_trick_again) {
         s_fade = s_clip >= 0;
+        if (s_fade) {
+            s_switched_at = p->t;
+        }
         s_gen += s_fade;
         s_clip = clip;
         s_since = p->t;

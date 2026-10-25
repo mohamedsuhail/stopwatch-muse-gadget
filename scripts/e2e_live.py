@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""End-to-end test of live conversations on a flashed StopWatch, over its serial port.
+"""End-to-end test of live conversations on a flashed Charm, over its serial port.
 
-    uv run --no-project --with pyserial python scripts/e2e_live.py [PORT] [--provider gemini|xai|both]
+    uv run --no-project --with pyserial python scripts/e2e_live.py [PORT]            # the quick check
+    uv run --no-project --with pyserial python scripts/e2e_live.py [PORT] --all      # everything, before a commit
+    ... --provider gemini|xai|both   (quick: the one; default the current one. --all: default both)
 
-It drives the watch the way a person would, except that questions are typed
+Every conversation is a paid live session (xAI bills each minute one is open), and Muse is
+really asked, so the default is the quick check: one conversation on the current voice, with a
+spoken question for Muse, its answer read out, and a spoken goodbye (about 40 s). --all runs
+every scenario on the voices chosen, and the cold start after a reboot (about 13 min for both).
+
+It drives Charm the way a person would, except that questions are typed
 (">live_ask=...", which the live voice gets as if it had heard them) rather
 than spoken, and spoken questions are fed in place of the mic (">mic=...",
 16 kHz PCM from macOS's `say`, in real time), so the voice's own turn detection
@@ -20,7 +27,8 @@ import serial
 
 ap = argparse.ArgumentParser()
 ap.add_argument("port", nargs="?", default="/dev/cu.usbmodem101")
-ap.add_argument("--provider", default="both", choices=["gemini", "xai", "both"])
+ap.add_argument("--provider", default=None, choices=["gemini", "xai", "both"])
+ap.add_argument("--all", action="store_true", help="every scenario, not the quick check")
 args = ap.parse_args()
 
 ser = serial.Serial(args.port, 115200, timeout=0.2)
@@ -38,6 +46,11 @@ def reader():
 
 
 threading.Thread(target=reader, daemon=True).start()
+
+# macOS's `say` takes a few seconds to load a voice the first time: warmed now, so the first
+# spoken question doesn't come after Charm has given up waiting (5 s after the press).
+with tempfile.TemporaryDirectory() as _tmp:
+    subprocess.run(["say", "-r", "175", "-o", os.path.join(_tmp, "warm.aiff"), "Ready."], check=True)
 
 
 def text_from(mark):
@@ -106,6 +119,7 @@ def speak(text):
         pcm = w.readframes(w.getnframes()) + b"\0" * (16000 * 2 * 3 // 2)
     m0 = mark()
     t0 = time.time()
+    print(f"        (speaking {len(pcm) / 32000:.1f} s of audio)", flush=True)
     for i, off in enumerate(range(0, len(pcm), 640)):
         send(b">mic=" + base64.b64encode(pcm[off:off + 640]) + b"\n")
         delay = t0 + (i + 1) * 0.02 - time.time()
@@ -265,14 +279,47 @@ def save_log():
 
 atexit.register(save_log)   # kept even if the run dies (the port gone, a crash)
 
+def quick(provider):
+    """One conversation: a spoken question for Muse, its answer read out, a spoken goodbye."""
+    print(f"\n== {provider}: quick check ==", flush=True)
+    send(f">live_provider={provider}\n".encode())
+    time.sleep(1)
+    m0, ok = start_conversation()
+    check(f"{provider}: conversation starts", bool(ok), ok and f"set up in {ok.group(1)} ms")
+    if not ok:
+        return
+    m = speak("What's on my calendar today?")
+    heard = wait_for(r'you: "([^"]*)"', m, 30)
+    check(f"{provider}: spoken question heard", bool(heard) and "calendar" in heard.group(1).lower(),
+          heard and f'"{heard.group(1)}"')
+    answered = wait_for(r"Muse answered in ([\d.]+)s", m, 90)
+    check(f"{provider}: Muse answers", bool(answered), answered and f"{answered.group(1)} s")
+    reading = wait_for(r"reading Muse's answer", m, 30)
+    played = None
+    if reading:
+        end = time.time() + 45
+        while time.time() < end and not played:
+            played = re.search(r"reply played", text_from(m)[reading.end():])
+            time.sleep(0.3)
+    check(f"{provider}: Muse's answer read out", bool(played))
+    m = speak("Thanks, that's all. Goodbye!")
+    over = conversation_over(m, 40)
+    check(f"{provider}: spoken goodbye ends it", bool(over) and over.group(1) == "goodbye",
+          over and f"ended ({over.group(1)})")
+    time.sleep(3)
+
+
 m0 = mark()
 send(b">live_provider?\n")
 found = wait_for(r"@live_provider (\w+)", m0, 5)
 before = found.group(1) if found else "xai"
-providers = ["gemini", "xai"] if args.provider == "both" else [args.provider]
-for p in providers:
-    run(p)
-cold_start(providers[0])
+if args.all:
+    providers = ["gemini", "xai"] if args.provider in ("both", None) else [args.provider]
+    for p in providers:
+        run(p)
+    cold_start(providers[0])
+else:
+    quick(before if args.provider in ("both", None) else args.provider)
 
 whole = text_from(0)
 stuck = re.findall(r"voice loop has been stuck[^\n]*", whole)

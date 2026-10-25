@@ -1339,3 +1339,9 @@ void muse_pixel_render(const muse_pose_t *p)
     }
 #undef YP
 }
+
+/* The pixel art has no clips to change between: no poof. */
+float muse_pixel_switched_at(void)
+{
+    return -1;
+}

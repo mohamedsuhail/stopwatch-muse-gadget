@@ -285,7 +285,12 @@ state. `avatar/character/muse_pixel.c` replaces the SDK's pixel renderer behind 
   loop; every two loops of it while idle, bubbles or juggling plays once, in turn. While Muse
   works on a question in a conversation, a nod, then checking (a wrist tap). Speaking, thinking,
   happy (`[face-joy]`, a hop), sad (a head shake) and goodbye (a wave into sleep, cut at 3.8 s to
-  hold asleep) as before; wake and error are the old clips, resized.
+  hold asleep) as before. One clip changing into another goes through a poof: a white ring
+  flashing out from the character with eight sparkles over 0.3 s, over the three-frame fade
+  (Mobot's puff of magic smoke, without the smoke: LVGL circles, nothing stored). Waking is the
+  set's stretch and yawn, held on its neutral end, and error
+  is the head shake looped: every clip is from the one set now, so none cuts into another with a
+  jump (the old wake and error clips, drawn apart, did).
 - **Tapping the character** waves back: goodbye's wave (0.7 s in, for 1.5 s), held on its last
   frame until the tap reaction ends (`CLIP_WAVE` in `avatar/character/muse_pixel.c`).
 - **Packing:** `python3 avatar/character/make_anims.py` (needs ffmpeg and Pillow,
@@ -468,8 +473,11 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   tool, as a typed Muse turn, with your exact words, names, dates and constraints, and never
   passwords, card numbers or codes; Muse asks you before it sends, buys, books or deletes. Muse's
   answer, once the conversation is quiet, plays its faces as reactions and is read out word for
-  word in Grok's voice (`force_message`), after Grok says "Let me check." Grok shows faces itself
-  with `set_mood` when a reply has a clear feeling.
+  word in Grok's voice (`force_message`), after Grok says "Let me check." A long answer (research,
+  a list) is briefed first: its first sentences, about 200 characters, and "The full answer is in
+  your Muse app." Grok never asks whether there's anything else afterwards: when you're done you
+  say so, and the conversation ends on its own. Grok shows faces itself with `set_mood` when a
+  reply has a clear feeling.
 - **Tricks:** ask for something fun ("blow some bubbles", "juggle", "wave", "do a trick") and the
   voice does it itself with `do_trick` (never Muse): the character blows bubbles (6 s), juggles
   planets (8 s) or waves, once through, while the voice says a playful line. Unlike a face, a trick
@@ -485,13 +493,17 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
 - **Who's answering:** Grok's, Gemini's or Muse's logo (20 px, `avatar/icons`, made by
   `avatar/make_icons.py` and copied in by `build.sh`) in a 60 px soap bubble at 3 o'clock, 20 px
   in from the screen's edge (about a Pixel Watch app's margin; at 24 the astronaut's happy hop
-  would touch it), while that one answers, and Muse's while Muse is working on a question
+  would touch it), bobbing gently while it's out (6 px, 3.2 s a bob), while that one answers, and Muse's while Muse is working on a question
   (a spinner runs round the bubble's rim while we wait). The bubble blows up in 0.2 s; when
   nobody has been answering for 0.15 s it bursts: the logo goes, the bubble swells and fades,
   and eight droplets fly out, over 0.3 s (`bubble_tick()` in `muse_ui.c`).
 - **Turns** end by xAI's voice detection. Every 20 ms the voice task plays a chunk of the reply
   and reads one from the mic; the mic streams to xAI except while the speaker plays and for
-  300 ms after.
+  300 ms after. While it listens, only a voice near Charm goes through (`muse_near.c`, from
+  Mobot's NearVoice): 6 dB over the room's noise as it's followed (10 dB in a loud room) and at
+  least −50 dBFS, with the 300 ms before it and held 600 ms through pauses; people talking across
+  the room, which xAI's voice detection would take for a turn, go as silence. The room has a
+  floor, so a mic starting on digital silence can't drag it to nothing.
 - **On the wire** (following xAI's Voice Agent guide): audio goes both ways as binary WebSocket
   frames, no base64. The mic goes up as 8 kHz G.711 mu-law (11 KB/s): the watch's 2.4 GHz upload
   can fall to about 10 KB/s, under the 43 KB/s base64 16 kHz PCM needs. Replies come down as
@@ -501,7 +513,9 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
   at −1 dBFS whose gain eases down before a peak and back over 100 ms. The one before it jumped
   its gain to each peak a sample at a time, and loud words crackled. When the network falls
   behind and a reply runs dry, its last chunk eases out over 4 ms and the next eases back in,
-  rather than clicking into silence and out again. `reasoning.effort` stays at xAI's default (with `none` Grok said its tool calls out
+  rather than clicking into silence and out again. A reply plays once 200 ms of it is buffered;
+  after one has run dry, the next replies in that conversation buffer 200 ms more first, up to
+  600 ms. `reasoning.effort` stays at xAI's default (with `none` Grok said its tool calls out
   loud), and transcription gets an English hint and key terms. Up to 4 s of mic is kept while connecting; later, more than 1 s behind is dropped.
   The log shows `mic to xAI: 21.0s so far (0.0s dropped behind)` every 5 s and any send over
   250 ms.
@@ -521,11 +535,17 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
 - **On screen:** only listening or speaking, never a waiting state or dots (the mic is open the
   whole time), and no lit ring (one that followed the voice redrew the whole screen at every
   step and halved the frame rate). While it listens, a yellow arc on the rim at 6 o'clock follows
-  your voice: 14° in silence, growing to 90° at most as you talk (LVGL redraws only its moving
-  ends). It's on the face, so it slides off with it to settings; the bubble just goes.
-  Captions are the last three lines said (about 22 letters wide: that low, the round screen is
-  narrow), left-aligned a little above the arc on their scrim over the full-size character, kept with the
-  audio as it plays. The voice's logo is in its bubble at 3 o'clock.
+  your voice: 14° in silence, growing to 90° for a loud voice (LVGL redraws only its moving ends).
+  Its level is the voice over the room's noise, averaged over 100 ms rather than each 20 ms chunk
+  (which spiked on every syllable), and it moves like a critically damped spring, settling in
+  0.25 s growing and 0.5 s falling, so it never jerks and the room leaves it still (as Mobot's arc
+  does). It's on the face, so it slides off with it to settings; the bubble just goes.
+  Captions show the reply a page at a time: three lines of about 22 letters (that low, the round
+  screen is narrow), the whole page being spoken shown at once and kept until the speech reaches
+  the next, a page ending at a sentence's end where one falls at least a quarter of the way in,
+  rather than the last lines moving on with every word. The last words stay 2.5 s after the reply
+  (or after a barge-in cuts it), then go. They're left-aligned a little above the arc on their
+  scrim over the full-size character. The voice's logo is in its bubble at 3 o'clock.
 - **A click** while it speaks stops the reply and the conversation goes on; while it listens,
   a click ends the conversation. The top-left button (the speaker) says "SPEAKER ON/OFF"
   mid-conversation too: with it off you hear nothing.
@@ -567,14 +587,19 @@ without one the watch says "SET AN XAI KEY". It connects only for the conversati
     answer without saying it: then the watch nudges it once with a short text turn (or after 8 s
     of nothing at all from it: a nudge while it's still working on a long answer would cut it off).
 - **Testing it end to end:** `uv run --no-project --with pyserial python scripts/e2e_live.py
-  [PORT] [--provider gemini|xai|both]`, with Charm idle, drives conversations over serial:
-  presses talk, types questions (`>live_ask=...`) or speaks them (`say` audio fed where the mic
-  goes, `>mic=<base64 PCM>`), and checks the log for small talk, the weather, Muse questions and
-  their read-out, a home question, a trick (bubbles, not sent to Muse), a click over a reply, a goodbye, silence, and Muse straight
-  after a reboot, plus no stuck loop, no errors and internal RAM never running out.
+  [PORT]`, with Charm idle, drives a conversation over serial: presses talk, speaks a question
+  (`say` audio fed where the mic goes, `>mic=<base64 PCM>`) and checks the log for Muse's answer
+  and its read-out and a spoken goodbye. That's the quick check (about 40 s on the current voice;
+  `--provider` picks the other): every conversation is a paid live session, so it's the default.
+  `--all` runs everything on both voices (about 13 min, for a commit): typed questions
+  (`>live_ask=...`) too, small talk, the weather, Muse questions and their read-out, a home
+  question, a trick (bubbles, not sent to Muse), a click over a reply, a goodbye, silence, and
+  Muse straight after a reboot, plus no stuck loop, no errors and internal RAM never running out.
 - The protocol and instructions are the live-voice prototype's (`prototype/live-voice/orchestrator.js`,
   branch `live-voice-prototype`), which the simulator keeps matching. `tests/test_muse_echo.py`
-  feeds the echo gate a reply's echo, a voice over it and the StopWatch's loud speaker.
+  feeds the echo gate a reply's echo, a voice over it and the StopWatch's loud speaker;
+  `tests/test_muse_near.py` feeds the near-voice gate a room, talk across it, a voice at arm's
+  length and a mic starting on silence.
 
 ### Talking: hands-free voice notes (without live_talk)
 
